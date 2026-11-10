@@ -212,3 +212,23 @@ Meilisearch v1.56.2, measured by `tests/Integration` (not by the probe).
     that expects a word not to match must pick one no text field comes close to.
 48. Accepted by the settings call as sent: `faceting.sortFacetValuesBy: {"*": "count"}`,
     `filterableAttributes` with `id` in it, `pagination.maxTotalHits`.
+
+## L. Found while building the Typesense adapter (2026-11-10)
+
+Typesense 30.2, measured with curl against a throwaway container and by `tests/Integration`.
+
+49. **Collections keep a `metadata` object**: given on `POST /collections`, returned by `GET`,
+    replaced whole by `PATCH /collections/{name}` (alone or with `fields`).
+50. **At most 3 sort keys**: a fourth is 400 "Only upto 3 sort fields are allowed."
+51. `include_fields` without `id` returns documents without their id.
+52. `PATCH` with a field dropped and added again in the same request (`{"name":"x","drop":true}`,
+    then its new definition) is accepted and reindexes the stored documents: a field made a
+    facet afterwards counted the documents already there. Changing the type the same way was
+    accepted too (the library refuses it, section 10 of the design).
+53. **`DELETE /collections/{name}` of a missing collection** answers 404 "No collection with name
+    `x` found.", not "Collection not found" (search, get and writes).
+54. A boolean facet's values are `"true"` and `"false"`, as on Meilisearch.
+55. An import line with a value of the wrong type (`"price":"abc"` on a float) is refused with
+    code 400 "Field `price` must be a float."; the other lines are kept (finding 5).
+56. The contract suite (39 tests) passed on Typesense without a change, and on Meilisearch:
+    the common ground of section D-H holds through the adapters.

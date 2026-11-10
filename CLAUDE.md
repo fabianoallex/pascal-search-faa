@@ -16,21 +16,23 @@ This file records only what is specific to this repository.
 
 ## Where things stand (2026-11-10)
 
-- **Decisions**: `docs/design.md` (S1-S24, accepted; sections 8 and 9 are what the core and
-  the Meilisearch adapter settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
+- **Decisions**: `docs/design.md` (S1-S24, accepted; sections 8, 9 and 10 are what the core,
+  the Meilisearch adapter and the Typesense adapter settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
   "finding N". Read both before changing the contract.
-- **Done**: core (`src/`) and mock; the Meilisearch adapter (`adapters/meilisearch`, its own
-  package) on pascal-common-faa 1.31.0's `PascalCommon.Http`. Unit suite 105/105 and
-  integration suite 50/50 (the contract suite plus the adapter's tests, on Meilisearch in
+- **Done**: core (`src/`) and mock; the Meilisearch and Typesense adapters
+  (`adapters/meilisearch`, `adapters/typesense`, each its own package) on pascal-common-faa
+  1.31.0's `PascalCommon.Http`. Unit suite 135/135; integration suite 63/63 twice (the
+  contract suite on Meilisearch, then on Typesense, plus both adapters' tests; engines in
   Docker, http and https with a private CA), 0 leaks, on FPC Linux and Windows. Delphi: the
-  user compiles and runs both suites in the IDE.
+  user compiles both suites in the IDE; the `.exe` can be run from here.
 - **HTTP**: only through `PascalCommon.Http` (pascal-common-faa 1.31.0+): one transport per
   engine, kept alive; tests on `TPcFakeHttpTransport`. Paths and queries encoded with
   `PcPercentEncode`. A POST is never sent twice by the transport, and the adapters don't
   repeat a write either (design, section 9).
-- **Next**: `adapters/typesense` (its own package, the same contract suite), then the outbox
-  bridge (a separate package depending on pascal-db-faa), sample and guide, then the entry in
-  the skill's `faa-libraries.md` once a version is published.
+- **Typesense keeps the library's schema in the collection's metadata** (design, section 10):
+  the adapter checks filter/sort/facet fields and builds `query_by` from it.
+- **Next**: the outbox bridge (a separate package depending on pascal-db-faa), sample and
+  guide, then the entry in the skill's `faa-libraries.md` once a version is published.
 
 ---
 
@@ -47,6 +49,8 @@ on purpose (`'Café'`, `'Água'`).
 - **Each adapter is its own package** (`adapters/<engine>/`, `pascal_search_faa_<engine>.lpk`):
   the core needs pascal-common-faa 1.20.0, an adapter 1.31.0 (`$MESSAGE FATAL` in its unit).
 
+- **Every `.pas` is UTF-8 with a BOM** (a file written by a tool has none: add it). Delphi reads
+  a file without one as ANSI and garbles accented literals (gotcha 9).
 - **`{$I pascalsearch.inc}` right after `unit ...;`**: `{$MODE DELPHI}{$H+}` on FPC,
   `PASCALSEARCH_WINDOWS`, `PASCALSEARCH_FUNCREFS`.
 - **`uses` without namespaces** (`SysUtils`, never `System.SysUtils`).
@@ -83,10 +87,12 @@ on purpose (`'Café'`, `'Água'`).
   the probe belongs there; what one engine does differently goes to that adapter's tests or to
   `PascalSearch.MockTests`. Engines have typo tolerance: a test expecting a word not to match
   picks one no text field comes close to (gotcha 6).
-- The integration suite (`tests/Integration`) runs the contract suite on Meilisearch
-  (`PascalSearch.IntegrationEnv` points `ContractEnv` at it) plus each adapter's own tests (TLS,
-  auth, tasks). Engines: `sh tools/engines.sh` (up/down; host ports 17700 http and 17701 https,
-  CA in `.ci/it-certs`).
+- The integration suite (`tests/Integration`) runs the contract suite on the engine
+  `SEARCH_CONTRACT_ENGINE` names (`meilisearch`, the default, or `typesense`;
+  `PascalSearch.IntegrationEnv` points `ContractEnv` at it) plus both adapters' own tests (TLS,
+  auth, tasks, metadata); the scripts run it once per engine. Engines: `sh tools/engines.sh`
+  (up/down; Meilisearch on host ports 17700/17701, Typesense on 18108/18109, http/https; CA in
+  `.ci/it-certs`).
 - Exceptions in tests: `try ... TAssert.Fail(...) except on E: EClass do ... end` (the compat
   unit's `AssertException` demands the exact class).
 - Runs: `sh tools/test_fpc_docker.sh` (unit, Linux FPC 3.2.2, heaptrc),

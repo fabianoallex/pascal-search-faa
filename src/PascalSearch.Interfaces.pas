@@ -1,4 +1,4 @@
-unit PascalSearch.Interfaces;
+﻿unit PascalSearch.Interfaces;
 
 {$I pascalsearch.inc}
 

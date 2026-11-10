@@ -2,7 +2,8 @@
 
 { FPCUnit runner for the integration tests. Same coverage as the DUnitX
   suite (tests/Integration/PascalSearch.IntegrationSuite.dpr): the contract
-  suite on Meilisearch plus the adapter's own tests, the fixtures generated
+  suite on Meilisearch or Typesense (SEARCH_CONTRACT_ENGINE) plus both
+  adapters' own tests, the fixtures generated
   from the DUnitX masters by tools/gen_fpc_mirror.py. The contract suite's
   mirror lives in tests/Unit/fpc, hence the paths below. Needs the engines
   (sh tools/engines.sh; PascalSearch.IntegrationEnv for other addresses).
@@ -27,7 +28,8 @@ uses
   PascalSearch.ContractEnv in '../../Unit/PascalSearch.ContractEnv.pas',
   PascalSearch.ContractTests in '../../Unit/fpc/PascalSearch.ContractTests.pas',
   PascalSearch.IntegrationEnv in '../PascalSearch.IntegrationEnv.pas',
-  PascalSearch.MeilisearchIntegrationTests;
+  PascalSearch.MeilisearchIntegrationTests,
+  PascalSearch.TypesenseIntegrationTests;
 
 var
   ConsoleApp: TTestRunner;
@@ -35,9 +37,11 @@ begin
   // The tests' accented literals are UTF-8: a plain FPC console's code page
   // isn't, by default.
   SetMultiByteConversionCodePage(CP_UTF8);
-  // The contract suite runs on Meilisearch here.
-  ContractEngineFactory := MeiliContractEngine;
+  // The contract suite runs on the engine SEARCH_CONTRACT_ENGINE names
+  // (meilisearch by default); the scripts run this program once per engine.
+  ContractEngineFactory := IntegrationContractEngine;
   ContractWait := 30000;
+  Writeln('Contract suite on: ', ContractEngineName);
 
   {$IFDEF MSWINDOWS}
   if ParamCount = 0 then

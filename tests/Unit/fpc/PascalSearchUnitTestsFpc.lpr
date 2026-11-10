@@ -24,7 +24,8 @@ uses
   PascalSearch.CoreTests,
   PascalSearch.ContractTests,
   PascalSearch.MockTests,
-  PascalSearch.MeilisearchTests;
+  PascalSearch.MeilisearchTests,
+  PascalSearch.TypesenseTests;
 
 var
   ConsoleApp: TTestRunner;

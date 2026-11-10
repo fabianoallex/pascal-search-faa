@@ -1,4 +1,4 @@
-unit PascalSearch.Filters;
+﻿unit PascalSearch.Filters;
 
 {$I pascalsearch.inc}
 

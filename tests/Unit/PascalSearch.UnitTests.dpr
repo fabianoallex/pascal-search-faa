@@ -25,13 +25,16 @@ uses
   PascalSearch.Interfaces in '..\..\src\PascalSearch.Interfaces.pas',
   PascalSearch.Query in '..\..\src\PascalSearch.Query.pas',
   PascalSearch.Mock in '..\..\src\PascalSearch.Mock.pas',
+  PascalSearch.EngineJson in '..\..\src\PascalSearch.EngineJson.pas',
   PascalSearch.Meilisearch in '..\..\adapters\meilisearch\PascalSearch.Meilisearch.pas',
+  PascalSearch.Typesense in '..\..\adapters\typesense\PascalSearch.Typesense.pas',
   PascalSearch.DUnitXCompat in 'PascalSearch.DUnitXCompat.pas',
   PascalSearch.ContractEnv in 'PascalSearch.ContractEnv.pas',
   PascalSearch.CoreTests in 'PascalSearch.CoreTests.pas',
   PascalSearch.ContractTests in 'PascalSearch.ContractTests.pas',
   PascalSearch.MockTests in 'PascalSearch.MockTests.pas',
-  PascalSearch.MeilisearchTests in 'PascalSearch.MeilisearchTests.pas';
+  PascalSearch.MeilisearchTests in 'PascalSearch.MeilisearchTests.pas',
+  PascalSearch.TypesenseTests in 'PascalSearch.TypesenseTests.pas';
 
 var
   runner: ITestRunner;

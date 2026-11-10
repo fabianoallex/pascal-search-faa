@@ -45,6 +45,10 @@
         <DefaultFilename Value="..\..\..\packages\pascal_search_faa_meilisearch.lpk"/>
       </Item>
       <Item>
+        <PackageName Value="pascal_search_faa_typesense"/>
+        <DefaultFilename Value="..\..\..\packages\pascal_search_faa_typesense.lpk"/>
+      </Item>
+      <Item>
         <PackageName Value="FPCUnitTestRunner"/>
       </Item>
       <Item>

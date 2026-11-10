@@ -53,3 +53,20 @@ distribution on Meilisearch (finding 45): Meilisearch has no "facet only" declar
 facet is any filterable attribute. Typesense refuses a field without `facet: true`. Declare
 `sfFacet` for every facet; the contract tests a field that is neither, and the mock's
 stricter refusal is in `PascalSearch.MockTests` (`Facet_FilterableNotFacet_RequestError`).
+
+## 8. A constant named like a method of the class is the method, inside it
+
+A test unit declared `COLLECTION = '{...}'` and its fixture a method `Collection`. Inside the
+fixture's methods `Ok(COLLECTION)` failed on FPC with "Incompatible type for arg no. 1: Got
+"untyped", expected "AnsiString"": Pascal ignores case, and the method hides the unit's
+constant within the class. Renamed `COLLECTION_JSON`. (`tests/Unit/PascalSearch.TypesenseTests.pas`.)
+
+## 9. A `.pas` without a BOM is ANSI to Delphi
+
+`TTypesenseTests.Search_Url` passed on FPC and failed on Delphi 12 (Win32 and Win64): the
+expected URL had `caf%C3%A9` and Delphi sent `caf%C3%83%C2%A9`. The unit was UTF-8 without a
+BOM, so Delphi read the literal `'café'` as ANSI, two characters for the `é`, and the adapter
+encoded both. Tests that only compared a literal with itself passed on both, which hid it in
+`PascalSearch.MeilisearchTests`. Every `.pas` in `src/`, `adapters/` and `tests/` has a UTF-8
+BOM, as Delphi writes them (the `dual-compiler-delphi-lazarus` skill's rule); the Lazarus
+packages' generated `.pas` don't need one.

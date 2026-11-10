@@ -4,6 +4,7 @@
     <Targets>
       <Target FileName="packages\pascal_search_faa.lpk"/>
       <Target FileName="packages\pascal_search_faa_meilisearch.lpk"/>
+      <Target FileName="packages\pascal_search_faa_typesense.lpk"/>
       <Target FileName="tests\Unit\fpc\PascalSearchUnitTestsFpc.lpi">
         <BuildModes>
           <Mode Name="Default"/>

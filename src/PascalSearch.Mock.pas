@@ -1,4 +1,4 @@
-unit PascalSearch.Mock;
+﻿unit PascalSearch.Mock;
 
 {$I pascalsearch.inc}
 

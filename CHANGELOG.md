@@ -27,7 +27,16 @@ contract may change in a minor version (it is validated against two engines firs
   `TSleep`); a refused batch raises `ESearchWriteFailed` with every id; a write without an answer
   raises `ESearchUnavailable` and is not repeated. Native access: `IMeilisearchEngine.Send`,
   `WaitForTask`. `MeilisearchFilterText` writes filters with every string quoted and escaped.
-- Unit suite: 105 tests (core, the contract suite on the mock, the mock's own, the Meilisearch
-  adapter on a fake transport). Integration suite: 50 tests (the contract suite and the
-  adapter's own on Meilisearch in Docker, http and https with a private CA;
-  `tools/engines.sh`). DUnitX masters and generated FPCUnit mirrors.
+- `PascalSearch.Typesense` (package `pascal_search_faa_typesense`, Typesense 30.2): the
+  contract over the same HTTP client and TLS options. The library's schema is kept in the
+  collection's metadata, so filter, sort and facet fields are checked as on the other engines
+  and the Text fields searched; `EnsureIndex` changes a collection in place with one PATCH.
+  Imports report refused documents through `WaitFor`, the others kept. `TypesenseFilterText`
+  writes every string in backticks and refuses one holding a backtick. Native access:
+  `ITypesenseEngine.Send`.
+- `PascalSearch.EngineJson`: JSON helpers both adapters use (in the core package).
+- Unit suite: 135 tests (core, the contract suite on the mock, the mock's own, both adapters on
+  a fake transport). Integration suite: 63 tests, run once with the contract suite on
+  Meilisearch and once on Typesense (`SEARCH_CONTRACT_ENGINE`), with both adapters' own tests;
+  engines in Docker, http and https with a private CA (`tools/engines.sh`). DUnitX masters and
+  generated FPCUnit mirrors.

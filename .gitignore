@@ -1,6 +1,7 @@
 # build output
 lib/
 lib-meilisearch/
+lib-typesense/
 backup/
 *.exe
 *.o

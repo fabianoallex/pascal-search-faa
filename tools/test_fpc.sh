@@ -5,8 +5,10 @@
 # "0 unfreed memory blocks" (heaptrc).
 #
 #   sh tools/test_fpc.sh               the unit suite
-#   sh tools/test_fpc.sh integration   the integration suite; start the
-#                                      engines first (sh tools/engines.sh)
+#   sh tools/test_fpc.sh integration   the integration suite, once with the
+#                                      contract on Meilisearch and once on
+#                                      Typesense; start the engines first
+#                                      (sh tools/engines.sh)
 #
 # The Delphi side has no command-line equivalent: Delphi Community Edition
 # doesn't compile outside the IDE (dcc32 prints "This version of the product
@@ -19,8 +21,8 @@ LAZBUILD="${LAZBUILD:-lazbuild}"
 command -v "$LAZBUILD" >/dev/null 2>&1 || LAZBUILD=/c/lazarus4.0/lazbuild.exe
 
 case "${1:-unit}" in
-  unit) DIR=tests/Unit/fpc; PRJ=PascalSearchUnitTestsFpc ;;
-  integration) DIR=tests/Integration/fpc; PRJ=PascalSearchIntegrationTestsFpc ;;
+  unit) DIR=tests/Unit/fpc; PRJ=PascalSearchUnitTestsFpc; ENGINES=none ;;
+  integration) DIR=tests/Integration/fpc; PRJ=PascalSearchIntegrationTestsFpc; ENGINES="meilisearch typesense" ;;
   *) echo "usage: sh tools/test_fpc.sh [unit|integration]"; exit 2 ;;
 esac
 
@@ -31,7 +33,13 @@ if ! "$LAZBUILD" -B $PRJ.lpi > build.log 2>&1; then
   grep -E "Error|Fatal" build.log | head -30
   exit 1
 fi
-./$PRJ.exe --all --format=plain > run.log 2>&1 || true
-grep -E "^Number of|unfreed" run.log
-grep -B1 -A4 "Message:" run.log | head -60 || true
-grep -qE "^Number of errors: +0$" run.log && grep -qE "^Number of failures: +0$" run.log && grep -qE "^0 unfreed memory blocks" run.log
+FAILED=0
+for E in $ENGINES; do
+  [ "$E" = none ] || echo "== contract suite on $E"
+  SEARCH_CONTRACT_ENGINE=$E ./$PRJ.exe --all --format=plain > run.log 2>&1 || true
+  grep -E "^Number of|unfreed" run.log
+  grep -B1 -A4 "Message:" run.log | head -60 || true
+  grep -qE "^Number of errors: +0$" run.log && grep -qE "^Number of failures: +0$" run.log \
+    && grep -qE "^0 unfreed memory blocks" run.log || FAILED=1
+done
+exit $FAILED

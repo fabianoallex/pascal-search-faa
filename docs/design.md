@@ -3,7 +3,8 @@
 Status: **accepted 2026-11-09, as proposed** (the open questions of section 7 closed with the
 proposed defaults: milliseconds, words-only text, every word required, the common id set only).
 Core and mock implemented the same day (section 8 lists what the implementation settled). The
-Meilisearch adapter followed on 2026-11-10, on pascal-common-faa 1.31.0's HTTP client (section 9).
+Meilisearch adapter followed on 2026-11-10, on pascal-common-faa 1.31.0's HTTP client (section 9),
+and the Typesense adapter the same day (section 10): the contract suite passed on it unchanged.
 Every decision is numbered (S1...).
 "Finding N" points to [`engine-findings.md`](engine-findings.md) (Meilisearch 1.56.2 and
 Typesense 30.2, measured through FPC 3.2.2 on Linux).
@@ -24,9 +25,9 @@ A contract for external search engines, one adapter per engine, and an in-memory
 
 | Package | Units | Depends on |
 |---|---|---|
-| `pascal_search_faa` (core, `src/`) | `PascalSearch.Version`, `.Interfaces`, `.Schema`, `.Documents`, `.Filters`, `.Errors`, `.Values`, `.Query`, `.Mock` | pascal-common-faa 1.20.0+ (`PcFoldForSearch`, `PcLowerCase`), pascal-jsonmapper-faa 0.7.0+ (JSON DOM, DTO mapping) |
+| `pascal_search_faa` (core, `src/`) | `PascalSearch.Version`, `.Interfaces`, `.Schema`, `.Documents`, `.Filters`, `.Errors`, `.Values`, `.Query`, `.Mock`, `.EngineJson` | pascal-common-faa 1.20.0+ (`PcFoldForSearch`, `PcLowerCase`), pascal-jsonmapper-faa 0.7.0+ (JSON DOM, DTO mapping) |
 | `pascal_search_faa_meilisearch` (`adapters/meilisearch/`) | `PascalSearch.Meilisearch` | core, pascal-common-faa 1.31.0+ (`PascalCommon.Http`, `TSleep`/`TTicker`) |
-| `pascal_search_faa_typesense` | `PascalSearch.Typesense` | core |
+| `pascal_search_faa_typesense` (`adapters/typesense/`) | `PascalSearch.Typesense` | core, pascal-common-faa 1.31.0+ |
 | `pascal_search_faa_outbox` (later, step 7) | `PascalSearch.Outbox` | core, pascal-db-faa |
 
 **S1. JSON through pascal-jsonmapper-faa.** Its DOM (`TJsonValue`) gives the same text on both
@@ -189,7 +190,8 @@ in the mock. The rest goes through the native access (S20).
 - Field names: `[A-Za-z_][A-Za-z0-9_]*`, checked when the filter is built (a field name is
   written unquoted on both engines). A field not declared filterable in the schema is refused by
   the mock and by Meilisearch (400); the adapters don't check the schema themselves, the engine
-  answers.
+  answers. Typesense filters any indexed field, so its adapter checks filter, sort and facet
+  fields against the schema it keeps in the collection's metadata (section 10).
 
 **S14. String equality is "case-insensitive; accents depend on the engine".** Meilisearch `=`
 folds case only; Typesense `:=` folds case, accents and some symbols (finding 23). The contract
@@ -311,6 +313,7 @@ with the probe's hostile values (quotes, backslashes, backticks, `||`, `&&`).
 2. Here: skeleton; core (schema, documents, filters, errors), mock, unit suite. Done.
 3. Meilisearch adapter + integration suite. Done (section 9).
 4. Typesense adapter: if a contract test has to be bent for it, the contract changes, not the test.
+   Done (section 10): no contract test changed.
 5. Outbox bridge, sample, guide; entry in `faa-libraries.md` once a version is published.
 
 ## 7. Questions closed at acceptance
@@ -376,3 +379,41 @@ with the probe's hostile values (quotes, backslashes, backticks, `||`, `&&`).
 - **An empty write sends nothing** after the index check, and its `WaitFor` returns at once.
 - **The contract suite assumed no typos** in one place (`mineiro` matched `mineira`, finding 47);
   it now searches a word no text field comes close to (gotcha 6).
+
+## 10. What the Typesense adapter settled (0.1.0)
+
+- **The schema lives in the collection's metadata** (`"metadata": {"pascal_search": {...}}`:
+  the fields with kind and flags, and `max_hits`; finding 49). Typesense filters any indexed
+  field and needs `query_by` for words (findings 18, 20), so the adapter has to know the
+  declaration, also for an index it didn't ensure. With it the adapter refuses a filter, sort
+  or facet on a field not declared for it, as the mock and Meilisearch do, and the contract
+  suite needed no change. The schema is read once per engine and index (`EnsureIndex` and
+  `DropIndex` update it); a collection made without the library is read from its own fields.
+- **Only Text fields and fields with a flag are declared to Typesense**; Stored and flagless
+  fields are stored and returned, not indexed (Typesense keeps fields outside its schema,
+  finding 36). Every declared field is `optional`.
+- **`EnsureIndex` on an existing collection is one PATCH**: new fields added, a field whose
+  flags changed dropped and added again (Typesense reindexes it from the stored documents,
+  finding 52), a field no longer indexed dropped, the metadata replaced. A changed kind raises
+  `ESearchSchemaError`, as on the mock, although Typesense could reindex it.
+- **Writes are synchronous**; `WaitFor` raises the refused documents of an import
+  (`ESearchWriteFailed`, `WholeBatch` only when all were refused), the place every adapter
+  raises them (section 8). `Delete` deletes by `filter_by=id:[...]` in chunks of 100 ids (a
+  missing id is not an error); ids are `[A-Za-z0-9_-]`, so a list of them is safe from
+  finding 22. A POST without an answer is `ESearchUnavailable` and not repeated, as on
+  Meilisearch.
+- **Search**: `q=*` for a blank text; `drop_tokens_threshold` 0 or 1 (S16);
+  `max_facet_values=100` (Meilisearch's default `maxValuesPerFacet`); `include_fields` gets
+  `id` added (finding 51); hits past `MaxHits` are cut by the adapter (section 8). Words with no
+  Text field to search them in return nothing without a request (Typesense would refuse the
+  query; the mock and Meilisearch answer nothing). Typesense takes at most 3 sort keys
+  (finding 50): a fourth is its 400, `ESearchRequestError`, not checked by the library.
+- **`TTypesenseConfig` has no `WaitTimeoutMs`**: there is nothing to wait for (S22 otherwise
+  as on Meilisearch: URL, key, `TimeoutMs`, `Http`).
+- **`Raw`**: a query parameter; a JSON string goes as its text, anything else as its JSON. It
+  replaces a parameter of the same name.
+- **404 means a missing collection** for "Collection not found" and for DELETE's "No
+  collection with name ... found" (finding 53); any other 404 (a document, a field) is a
+  request error, and `Get` of a missing document is nil.
+- **The integration runner runs the contract suite once per engine**
+  (`SEARCH_CONTRACT_ENGINE`), with both adapters' own tests each time.

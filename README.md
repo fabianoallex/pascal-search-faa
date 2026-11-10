@@ -5,8 +5,9 @@ documents with string ids, batched upsert and delete, typed filters (never filte
 search with sort, paging and facets, and waiting until a write is searchable. Adapters per
 engine (Meilisearch first, Typesense to validate the contract) and an in-memory mock for tests.
 
-**Status: 0.1.0, unreleased.** The core, the mock and the Meilisearch adapter are done and
-tested; Typesense is next. Versions stay 0.x until the contract has run on both engines.
+**Status: 0.1.0, unreleased.** The core, the mock and both adapters (Meilisearch, Typesense)
+are done; the same contract suite passes on the mock and on both engines. Versions stay 0.x
+until the first release.
 
 Part of the `*-faa` family (MIT, Delphi 12 and FPC 3.2.2, `{$MODE DELPHI}`). Not an adapter of
 pascal-db-faa: a search engine is HTTP + JSON with asynchronous writes. A database's own
@@ -71,6 +72,25 @@ begin
 - Linux: the package `libssl3` (Debian 12; no `libssl-dev` needed), and `ca-certificates` for a
   server with a public certificate.
 
+## Typesense
+
+```pascal
+uses PascalSearch.Typesense;
+
+  Config := TTypesenseConfig.Create('https://search.internal:8108', ApiKey);
+  Config.Http.Tls.CaFile := 'ca.pem';
+  Engine := TTypesenseEngine.New(Config);
+```
+
+- The same TLS options as above. Writes are applied before the answer: `WaitFor` returns at
+  once, raising the documents an import refused (the others are kept).
+- `EnsureIndex` keeps the schema in the collection's metadata; the adapter checks filter, sort
+  and facet fields against it, and searches the `Text` fields.
+- A filter value can't hold a backtick on Typesense (nothing escapes it): such a value raises
+  `ESearchArgumentError`. At most 3 sort keys.
+- `(Engine as ITypesenseEngine).Send(Method, Path, Body)` reaches any endpoint (synonym sets,
+  curation...).
+
 ## Contents
 
 | Unit | What |
@@ -84,9 +104,12 @@ begin
 | `PascalSearch.Query` | query builder and results, shared by adapters |
 | `PascalSearch.Mock` | the contract in memory, with test controls |
 | `PascalSearch.Version` | `PASCALSEARCH_VERSION` |
+| `PascalSearch.EngineJson` | JSON helpers the adapters share |
 | `PascalSearch.Meilisearch` | the Meilisearch adapter (`adapters/meilisearch`, own package) |
+| `PascalSearch.Typesense` | the Typesense adapter (`adapters/typesense`, own package) |
 
-Docs: [`design.md`](docs/design.md) (decisions S1-S24), [`engine-findings.md`](docs/engine-findings.md)
+Docs: [`design.md`](docs/design.md) (decisions S1-S24; sections 8-10 what the
+implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 (what Meilisearch 1.56.2 and Typesense 30.2 did when probed), [`gotchas.md`](docs/gotchas.md).
 
 ## Dependencies
@@ -94,16 +117,18 @@ Docs: [`design.md`](docs/design.md) (decisions S1-S24), [`engine-findings.md`](d
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0+ (1.31.0+ with an
 adapter) and [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa)
 0.7.0+, each as the application's own submodule. Delphi: add `src/` of this library and of both
-to the search path, plus `adapters/meilisearch` for that engine. Lazarus:
-`packages/pascal_search_faa.lpk`, plus `packages/pascal_search_faa_meilisearch.lpk`.
+to the search path, plus `adapters/meilisearch` or `adapters/typesense` for an engine. Lazarus:
+`packages/pascal_search_faa.lpk`, plus `pascal_search_faa_meilisearch.lpk` or
+`pascal_search_faa_typesense.lpk`.
 
 ## Tests
 
 - Unit suite (no engine): FPC on Linux (Docker) `sh tools/test_fpc_docker.sh`, FPC on Windows
   (lazbuild) `sh tools/test_fpc.sh`, Delphi `tests/Unit/PascalSearch.UnitTests.dproj`.
-- Integration suite (the contract on Meilisearch, TLS included): `sh tools/engines.sh` starts
-  the engines in Docker (`down` removes them); then `sh tools/test_fpc.sh integration`, or
-  Delphi `tests/Integration/PascalSearch.IntegrationSuite.dproj`. On Linux,
+- Integration suite (the contract on Meilisearch and on Typesense, TLS included):
+  `sh tools/engines.sh` starts the engines in Docker (`down` removes them); then
+  `sh tools/test_fpc.sh integration`, or Delphi `tests/Integration/PascalSearch.IntegrationSuite.dproj`
+  run once per engine (`SEARCH_CONTRACT_ENGINE=meilisearch` or `typesense`). On Linux,
   `sh tools/test_integration_docker.sh` does it all.
 - Everything CI runs: `sh tools/ci-test.sh`.
 

@@ -1,4 +1,4 @@
-unit PascalSearch.Meilisearch;
+﻿unit PascalSearch.Meilisearch;
 
 {$I pascalsearch.inc}
 
@@ -166,7 +166,8 @@ uses
   PascalSearch.Errors,
   PascalSearch.Values,
   PascalSearch.Documents,
-  PascalSearch.Query;
+  PascalSearch.Query,
+  PascalSearch.EngineJson;
 
 {$IF PASCALCOMMON_VERSION < 13100}
   {$MESSAGE FATAL 'pascal-search-faa needs pascal-common-faa 1.31.0 or later (PascalCommon.Http)'}
@@ -303,59 +304,9 @@ begin
   Result := (AStatus >= 200) and (AStatus <= 299);
 end;
 
-// The member AName of AJson as text; '' when absent or null.
-function MemberText(AJson: TJsonValue; const AName: string): string;
-var
-  V: TJsonValue;
-begin
-  Result := '';
-  if (AJson = nil) or (AJson.Kind <> jkObject) then
-    Exit;
-  V := AJson.Find(AName);
-  if V = nil then
-    Exit;
-  case V.Kind of
-    jkString: Result := V.AsString;
-    jkNumber: Result := V.NumberText;
-    jkBoolean:
-      if V.AsBoolean then Result := 'true' else Result := 'false';
-  end;
-end;
-
-// An id as Meilisearch returns it: a string, or a number from a document
-// written by something other than this library.
-function JsonIdText(AValue: TJsonValue): string;
-begin
-  if AValue = nil then
-    Result := ''
-  else if AValue.Kind = jkString then
-    Result := AValue.AsString
-  else if AValue.Kind = jkNumber then
-    Result := AValue.NumberText
-  else
-    Result := '';
-end;
-
 function ParseBody(const ABody, AWhat: string): TJsonValue;
 begin
-  try
-    Result := ParseJson(ABody);
-  except
-    on E: EJsonError do
-      raise ESearchUnavailable.CreateEngine(Format('%s: %s answered something that isn''t JSON (%s).',
-        [ENGINE_NAME, AWhat, E.Message]), 0, '', '');
-  end;
-end;
-
-procedure WriteStrings(W: TJsonWriter; const AName: string; const AValues: array of string);
-var
-  I: Integer;
-begin
-  W.Name(AName);
-  W.BeginArray;
-  for I := 0 to High(AValues) do
-    W.WriteString(AValues[I]);
-  W.EndArray;
+  Result := SearchParseAnswer(ABody, ENGINE_NAME + ' ' + AWhat);
 end;
 
 { TMeilisearchConfig }
@@ -472,8 +423,8 @@ begin
   try
     LJson := ParseJson(AResponse.Body);
     try
-      LCode := MemberText(LJson, 'code');
-      LMessage := MemberText(LJson, 'message');
+      LCode := SearchJsonText(LJson, 'code');
+      LMessage := SearchJsonText(LJson, 'message');
     finally
       LJson.Free;
     end;
@@ -546,16 +497,16 @@ begin
   try
     Result := Default(TMeilisearchTask);
     Result.Uid := ATaskUid;
-    Result.Status := MemberText(LJson, 'status');
+    Result.Status := SearchJsonText(LJson, 'status');
     if Result.Status = '' then
       raise ESearchUnavailable.CreateEngine(Format('%s GET %s: the answer has no status.',
         [ENGINE_NAME, LPath]), 0, '', '');
     LError := LJson.Find('error');
     if (LError <> nil) and (LError.Kind = jkObject) then
     begin
-      Result.ErrorCode := MemberText(LError, 'code');
-      Result.ErrorType := MemberText(LError, 'type');
-      Result.ErrorMessage := MemberText(LError, 'message');
+      Result.ErrorCode := SearchJsonText(LError, 'code');
+      Result.ErrorType := SearchJsonText(LError, 'type');
+      Result.ErrorMessage := SearchJsonText(LError, 'message');
     end;
     if (Result.Status = 'canceled') and (Result.ErrorCode = '') then
     begin
@@ -646,7 +597,7 @@ begin
     RaiseAnswer('GET', LPath, LResponse);
   LJson := ParseBody(LResponse.Body, 'GET ' + LPath);
   try
-    APrimaryKey := MemberText(LJson, 'primaryKey');
+    APrimaryKey := SearchJsonText(LJson, 'primaryKey');
   finally
     LJson.Free;
   end;
@@ -783,9 +734,9 @@ begin
   W := TJsonWriter.Create;
   try
     W.BeginObject;
-    WriteStrings(W, 'searchableAttributes', LSearchable);
-    WriteStrings(W, 'filterableAttributes', LFilterable);
-    WriteStrings(W, 'sortableAttributes', LSortable);
+    SearchWriteStrings(W, 'searchableAttributes', LSearchable);
+    SearchWriteStrings(W, 'filterableAttributes', LFilterable);
+    SearchWriteStrings(W, 'sortableAttributes', LSortable);
     W.Name('pagination');
     W.BeginObject;
     W.Name('maxTotalHits');
@@ -1049,7 +1000,7 @@ begin
   W := TJsonWriter.Create;
   try
     W.BeginObject;
-    WriteStrings(W, 'ids', LWanted);
+    SearchWriteStrings(W, 'ids', LWanted);
     W.Name('limit');
     W.WriteInt64(Length(LWanted));
     W.EndObject;
@@ -1069,7 +1020,7 @@ begin
       for J := 0 to LResults.Count - 1 do
       begin
         LDoc := LResults.Items[J];
-        if (LDoc.Kind = jkObject) and (JsonIdText(LDoc.Find('id')) = AIds[I]) then
+        if (LDoc.Kind = jkObject) and (SearchJsonId(LDoc.Find('id')) = AIds[I]) then
         begin
           LList.AddHit(AIds[I], SearchCloneJson(LDoc));
           Break;
@@ -1153,7 +1104,7 @@ begin
       W.WriteInt64(ARequest.PageSize);
     end;
     if (Length(ARequest.Facets) > 0) and Mine('facets') then
-      WriteStrings(W, 'facets', ARequest.Facets);
+      SearchWriteStrings(W, 'facets', ARequest.Facets);
     if (Length(ARequest.Fields) > 0) and Mine('attributesToRetrieve') then
     begin
       LFields := Copy(ARequest.Fields, 0, Length(ARequest.Fields));
@@ -1166,7 +1117,7 @@ begin
         SetLength(LFields, Length(LFields) + 1);
         LFields[High(LFields)] := 'id';
       end;
-      WriteStrings(W, 'attributesToRetrieve', LFields);
+      SearchWriteStrings(W, 'attributesToRetrieve', LFields);
     end;
     for I := 0 to High(ARequest.Raw) do
     begin
@@ -1217,7 +1168,7 @@ begin
       for I := 0 to LHits.Count - 1 do
       begin
         LHit := LHits.Items[I];
-        LResult.AddHit(JsonIdText(LHit.Find('id')), SearchCloneJson(LHit));
+        LResult.AddHit(SearchJsonId(LHit.Find('id')), SearchCloneJson(LHit));
       end;
     LDist := LJson.Find('facetDistribution');
     for I := 0 to High(ARequest.Facets) do

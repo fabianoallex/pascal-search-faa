@@ -8,7 +8,8 @@ unit pascal_search_faa;
 interface
 
 uses
-  PascalSearch.Version, PascalSearch.Errors, PascalSearch.Values, PascalSearch.Schema, PascalSearch.Documents, PascalSearch.Filters, PascalSearch.Interfaces, PascalSearch.Query, PascalSearch.Mock;
+  PascalSearch.Version, PascalSearch.Errors, PascalSearch.Values, PascalSearch.Schema, PascalSearch.Documents, PascalSearch.Filters, PascalSearch.Interfaces, PascalSearch.Query, PascalSearch.Mock, 
+  PascalSearch.EngineJson;
 
 implementation
 

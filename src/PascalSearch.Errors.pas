@@ -1,4 +1,4 @@
-unit PascalSearch.Errors;
+﻿unit PascalSearch.Errors;
 
 {$I pascalsearch.inc}
 

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Builds and runs the integration suite on Linux FPC 3.2.2 inside Docker,
 # with heaptrc, against the engines of tools/engines.sh (started here and
-# removed at the end). Acceptance criterion: 0 errors, 0 failures, 0 unfreed
-# blocks.
+# removed at the end): once with the contract suite on Meilisearch, once on
+# Typesense. Acceptance criterion: 0 errors, 0 failures, 0 unfreed blocks,
+# both times.
 #
 # The runner joins the engines' network and reaches them by name; the TLS
 # tests use the private CA in .ci/it-certs. The image needs libssl3 (Debian
@@ -31,6 +32,10 @@ MSYS_NO_PATHCONV=1 docker run --rm --network pascalsearch-it-net -v "$MOUNT:/src
   -e SEARCH_MEILI_TLS_URL=https://meili-tls:7700 \
   -e SEARCH_MEILI_TLS_WRONG_URL=https://meili-tls-other:7700 \
   -e SEARCH_MEILI_TLS_PLAIN_URL=http://meili-tls:7700 \
+  -e SEARCH_TS_URL=http://typesense:8108 \
+  -e SEARCH_TS_TLS_URL=https://ts-tls:8108 \
+  -e SEARCH_TS_TLS_WRONG_URL=https://ts-tls-other:8108 \
+  -e SEARCH_TS_TLS_PLAIN_URL=http://ts-tls:8108 \
   -e SEARCH_CA_FILE=/t/.ci/it-certs/ca.pem \
   "$IMAGE" sh -c '
   set -e
@@ -39,13 +44,18 @@ MSYS_NO_PATHCONV=1 docker run --rm --network pascalsearch-it-net -v "$MOUNT:/src
   C=/t/external/pascal-common-faa/src
   J=/t/external/pascal-jsonmapper-faa/src
   cd /t/tests/Integration/fpc
-  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Integration -FU/t/u -gh -gl \
+  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu/t/adapters/typesense -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Integration -FU/t/u -gh -gl \
     -o/t/runner PascalSearchIntegrationTestsFpc.lpr > /t/build.log 2>&1 \
     || { grep -iE "error|fatal" /t/build.log | head -30; exit 1; }
   cd /t
-  HEAPTRC="log=/t/heap.txt" ./runner --all --format=plain > /t/run.log 2>&1 || true
-  grep -E "^Number of" /t/run.log
-  grep "unfreed" /t/heap.txt
-  grep -B1 -A4 "Message:" /t/run.log | head -120 || true
-  grep -qE "^Number of errors: +0$" /t/run.log && grep -qE "^Number of failures: +0$" /t/run.log \
-    && grep -qE "^0 unfreed memory blocks" /t/heap.txt'
+  FAILED=0
+  for E in meilisearch typesense; do
+    echo "== contract suite on $E"
+    SEARCH_CONTRACT_ENGINE=$E HEAPTRC="log=/t/heap-$E.txt" ./runner --all --format=plain > /t/run-$E.log 2>&1 || true
+    grep -E "^Number of" /t/run-$E.log
+    grep "unfreed" /t/heap-$E.txt
+    grep -B1 -A4 "Message:" /t/run-$E.log | head -120 || true
+    grep -qE "^Number of errors: +0$" /t/run-$E.log && grep -qE "^Number of failures: +0$" /t/run-$E.log \
+      && grep -qE "^0 unfreed memory blocks" /t/heap-$E.txt || FAILED=1
+  done
+  exit $FAILED'

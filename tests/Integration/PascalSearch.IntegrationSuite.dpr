@@ -1,8 +1,9 @@
 ﻿program PascalSearch.IntegrationSuite;
 
 { DUnitX runner for the integration tests: the contract suite
-  (tests/Unit/PascalSearch.ContractTests.pas) pointed at Meilisearch through
-  PascalSearch.ContractEnv, plus the adapter's own tests. Needs the engines:
+  (tests/Unit/PascalSearch.ContractTests.pas) pointed at Meilisearch or Typesense
+  (SEARCH_CONTRACT_ENGINE) through PascalSearch.ContractEnv, plus both
+  adapters' own tests. Needs the engines:
   "sh tools/engines.sh" starts them in Docker on this machine (host ports
   17700 and 17701); PascalSearch.IntegrationEnv says how to point elsewhere.
 
@@ -26,12 +27,15 @@ uses
   PascalSearch.Interfaces in '..\..\src\PascalSearch.Interfaces.pas',
   PascalSearch.Query in '..\..\src\PascalSearch.Query.pas',
   PascalSearch.Mock in '..\..\src\PascalSearch.Mock.pas',
+  PascalSearch.EngineJson in '..\..\src\PascalSearch.EngineJson.pas',
   PascalSearch.Meilisearch in '..\..\adapters\meilisearch\PascalSearch.Meilisearch.pas',
+  PascalSearch.Typesense in '..\..\adapters\typesense\PascalSearch.Typesense.pas',
   PascalSearch.DUnitXCompat in '..\Unit\PascalSearch.DUnitXCompat.pas',
   PascalSearch.ContractEnv in '..\Unit\PascalSearch.ContractEnv.pas',
   PascalSearch.ContractTests in '..\Unit\PascalSearch.ContractTests.pas',
   PascalSearch.IntegrationEnv in 'PascalSearch.IntegrationEnv.pas',
-  PascalSearch.MeilisearchIntegrationTests in 'PascalSearch.MeilisearchIntegrationTests.pas';
+  PascalSearch.MeilisearchIntegrationTests in 'PascalSearch.MeilisearchIntegrationTests.pas',
+  PascalSearch.TypesenseIntegrationTests in 'PascalSearch.TypesenseIntegrationTests.pas';
 
 var
   runner: ITestRunner;
@@ -41,9 +45,11 @@ var
 begin
   // Acceptance criterion on both sides: 0 leaks (FastMM here, heaptrc on FPC).
   ReportMemoryLeaksOnShutdown := True;
-  // The contract suite runs on Meilisearch here.
-  ContractEngineFactory := MeiliContractEngine;
+  // The contract suite runs on the engine SEARCH_CONTRACT_ENGINE names
+  // (meilisearch by default); the scripts run this program once per engine.
+  ContractEngineFactory := IntegrationContractEngine;
   ContractWait := 30000;
+  System.Writeln('Contract suite on: ', ContractEngineName);
   try
     TDUnitX.CheckCommandLine;
 

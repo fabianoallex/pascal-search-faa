@@ -1,4 +1,4 @@
-unit PascalSearch.Version;
+﻿unit PascalSearch.Version;
 
 {$I pascalsearch.inc}
 

@@ -1,4 +1,4 @@
-unit PascalSearch.Schema;
+﻿unit PascalSearch.Schema;
 
 {$I pascalsearch.inc}
 

@@ -30,7 +30,7 @@ MSYS_NO_PATHCONV=1 docker run --rm -v "$MOUNT:/src:ro" "$IMAGE" sh -c '
   C=/t/external/pascal-common-faa/src
   J=/t/external/pascal-jsonmapper-faa/src
   cd /t/tests/Unit/fpc
-  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Unit -FU/t/u -gh -gl \
+  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu/t/adapters/typesense -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Unit -FU/t/u -gh -gl \
     -o/t/runner PascalSearchUnitTestsFpc.lpr > /t/build.log 2>&1 \
     || { grep -iE "error|fatal" /t/build.log | head -30; exit 1; }
   cd /t

@@ -1,10 +1,9 @@
 #!/bin/sh
 # Everything CI runs (.github/workflows/ci.yml), also runnable locally with
 # Docker, on Linux FPC 3.2.2: the unit suite (core, contract suite on the
-# mock, mock, the Meilisearch adapter on a fake transport), then the
-# integration suite (the contract suite and the adapter's own tests on
-# Meilisearch v1.56.2 in Docker, http and https with a private CA). Typesense
-# joins when its adapter exists.
+# mock, mock, both adapters on a fake transport), then the integration suite
+# (the contract suite on Meilisearch v1.56.2 and on Typesense 30.2 in Docker,
+# and both adapters' own tests; http and https with a private CA).
 # Delphi Community Edition can't build headless, so the Delphi side is still
 # validated in the IDE (see CLAUDE.md, "Tests").
 #
@@ -27,5 +26,5 @@ echo "== test kit"
 python tools/gen_fpc_mirror.py --check
 echo "== unit suite"
 sh tools/test_fpc_docker.sh
-echo "== integration suite (Meilisearch)"
+echo "== integration suite (Meilisearch, Typesense)"
 sh tools/test_integration_docker.sh

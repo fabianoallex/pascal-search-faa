@@ -1,4 +1,4 @@
-unit PascalSearch.MeilisearchTests;
+﻿unit PascalSearch.MeilisearchTests;
 
 (* The Meilisearch adapter without a server: every request goes to
    pascal-common-faa's TPcFakeHttpTransport, which answers from a queue and

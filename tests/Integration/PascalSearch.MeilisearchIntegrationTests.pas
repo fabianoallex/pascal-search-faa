@@ -1,4 +1,4 @@
-unit PascalSearch.MeilisearchIntegrationTests;
+﻿unit PascalSearch.MeilisearchIntegrationTests;
 
 { The Meilisearch adapter against a real Meilisearch (v1.56.2 in Docker,
   tools/engines.sh): what the contract suite can't check because the mock has

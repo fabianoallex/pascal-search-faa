@@ -1,4 +1,4 @@
-unit PascalSearch.ContractEnv;
+﻿unit PascalSearch.ContractEnv;
 
 { Which engine the contract suite (PascalSearch.ContractTests) runs on. The
   unit suite leaves the default, the mock; an integration runner sets
