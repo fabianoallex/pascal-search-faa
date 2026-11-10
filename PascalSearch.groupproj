@@ -1,0 +1,48 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{71FC6853-F11D-4F50-9533-9E8EAECDF5AA}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="tests\Unit\PascalSearch.UnitTests.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="tests\Integration\PascalSearch.IntegrationSuite.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="PascalSearch_UnitTests">
+        <MSBuild Projects="tests\Unit\PascalSearch.UnitTests.dproj"/>
+    </Target>
+    <Target Name="PascalSearch_UnitTests:Clean">
+        <MSBuild Projects="tests\Unit\PascalSearch.UnitTests.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PascalSearch_UnitTests:Make">
+        <MSBuild Projects="tests\Unit\PascalSearch.UnitTests.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="PascalSearch_IntegrationSuite">
+        <MSBuild Projects="tests\Integration\PascalSearch.IntegrationSuite.dproj"/>
+    </Target>
+    <Target Name="PascalSearch_IntegrationSuite:Clean">
+        <MSBuild Projects="tests\Integration\PascalSearch.IntegrationSuite.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PascalSearch_IntegrationSuite:Make">
+        <MSBuild Projects="tests\Integration\PascalSearch.IntegrationSuite.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="PascalSearch_UnitTests;PascalSearch_IntegrationSuite"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="PascalSearch_UnitTests:Clean;PascalSearch_IntegrationSuite:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="PascalSearch_UnitTests:Make;PascalSearch_IntegrationSuite:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>

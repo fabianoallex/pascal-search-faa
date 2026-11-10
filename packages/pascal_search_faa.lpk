@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <PathDelim Value="\"/>
+    <Name Value="pascal_search_faa"/>
+    <Author Value="Fabiano Arndt"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="\"/>
+      <SearchPaths>
+        <IncludeFiles Value="..\src"/>
+        <OtherUnitFiles Value="..\src"/>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Description Value="A search-engine contract for Delphi and Lazarus/FPC (dual-compiler): a declared schema, documents with string ids, batched upsert and delete, typed filters, text search with sort, paging and facets, waiting until a write is searchable, and an in-memory mock. Engine adapters are separate packages (pascal_search_faa_meilisearch)."/>
+    <License Value="MIT"/>
+    <Version Minor="1"/>
+    <Files>
+      <Item>
+        <Filename Value="..\src\pascalsearch.inc"/>
+        <Type Value="Include"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Version.pas"/>
+        <UnitName Value="PascalSearch.Version"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Errors.pas"/>
+        <UnitName Value="PascalSearch.Errors"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Values.pas"/>
+        <UnitName Value="PascalSearch.Values"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Schema.pas"/>
+        <UnitName Value="PascalSearch.Schema"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Documents.pas"/>
+        <UnitName Value="PascalSearch.Documents"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Filters.pas"/>
+        <UnitName Value="PascalSearch.Filters"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Interfaces.pas"/>
+        <UnitName Value="PascalSearch.Interfaces"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Query.pas"/>
+        <UnitName Value="PascalSearch.Query"/>
+      </Item>
+      <Item>
+        <Filename Value="..\src\PascalSearch.Mock.pas"/>
+        <UnitName Value="PascalSearch.Mock"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="pascal_common_faa"/>
+        <MinVersion Major="1" Minor="20" Valid="True"/>
+      </Item>
+      <Item>
+        <PackageName Value="pascaljsonmapper_pkg"/>
+        <MinVersion Minor="7" Valid="True"/>
+      </Item>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>
