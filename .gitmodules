@@ -4,3 +4,6 @@
 [submodule "external/pascal-jsonmapper-faa"]
 	path = external/pascal-jsonmapper-faa
 	url = https://github.com/fabianoallex/pascal-jsonmapper-faa.git
+[submodule "external/pascal-db-faa"]
+	path = external/pascal-db-faa
+	url = https://github.com/fabianoallex/pascal-db-faa.git

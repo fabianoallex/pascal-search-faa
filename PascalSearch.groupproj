@@ -9,6 +9,9 @@
         <Projects Include="tests\Integration\PascalSearch.IntegrationSuite.dproj">
             <Dependencies/>
         </Projects>
+        <Projects Include="samples\01-outbox\SearchOutbox.dproj">
+            <Dependencies/>
+        </Projects>
     </ItemGroup>
     <ProjectExtensions>
         <Borland.Personality>Default.Personality.12</Borland.Personality>
@@ -35,14 +38,23 @@
     <Target Name="PascalSearch_IntegrationSuite:Make">
         <MSBuild Projects="tests\Integration\PascalSearch.IntegrationSuite.dproj" Targets="Make"/>
     </Target>
+    <Target Name="SearchOutbox">
+        <MSBuild Projects="samples\01-outbox\SearchOutbox.dproj"/>
+    </Target>
+    <Target Name="SearchOutbox:Clean">
+        <MSBuild Projects="samples\01-outbox\SearchOutbox.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="SearchOutbox:Make">
+        <MSBuild Projects="samples\01-outbox\SearchOutbox.dproj" Targets="Make"/>
+    </Target>
     <Target Name="Build">
-        <CallTarget Targets="PascalSearch_UnitTests;PascalSearch_IntegrationSuite"/>
+        <CallTarget Targets="PascalSearch_UnitTests;PascalSearch_IntegrationSuite;SearchOutbox"/>
     </Target>
     <Target Name="Clean">
-        <CallTarget Targets="PascalSearch_UnitTests:Clean;PascalSearch_IntegrationSuite:Clean"/>
+        <CallTarget Targets="PascalSearch_UnitTests:Clean;PascalSearch_IntegrationSuite:Clean;SearchOutbox:Clean"/>
     </Target>
     <Target Name="Make">
-        <CallTarget Targets="PascalSearch_UnitTests:Make;PascalSearch_IntegrationSuite:Make"/>
+        <CallTarget Targets="PascalSearch_UnitTests:Make;PascalSearch_IntegrationSuite:Make;SearchOutbox:Make"/>
     </Target>
     <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
 </Project>

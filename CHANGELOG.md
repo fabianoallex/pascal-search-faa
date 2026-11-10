@@ -3,7 +3,7 @@
 All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`; until 1.0.0 the
 contract may change in a minor version (it is validated against two engines first).
 
-## [Unreleased] - 0.1.0
+## [0.1.0] - 2026-11-10
 
 ### Added
 
@@ -35,8 +35,19 @@ contract may change in a minor version (it is validated against two engines firs
   writes every string in backticks and refuses one holding a backtick. Native access:
   `ITypesenseEngine.Send`.
 - `PascalSearch.EngineJson`: JSON helpers both adapters use (in the core package).
-- Unit suite: 135 tests (core, the contract suite on the mock, the mock's own, both adapters on
-  a fake transport). Integration suite: 63 tests, run once with the contract suite on
-  Meilisearch and once on Typesense (`SEARCH_CONTRACT_ENGINE`), with both adapters' own tests;
-  engines in Docker, http and https with a private CA (`tools/engines.sh`). DUnitX masters and
-  generated FPCUnit mirrors.
+- `PascalSearch.Outbox` (package `pascal_search_faa_outbox`, `bridges/outbox`; pascal-db-faa
+  0.18.0 or later): `TSearchOutboxHandler`, a handler for pascal-db-faa's outbox local sink that
+  keeps an index in step with the database. The event carries ids (`SearchOutboxPayload`,
+  `SearchOutboxIds`, or an `IdsReader`); a `TSearchDocumentLoader` returns the current
+  documents, ids without one are deleted; both writes are waited for; every failure is raised
+  so the outbox retries. `Sync(Ids)` is the same step for a full reindex. Design, section 11.
+- Sample `samples/01-outbox` (`SearchOutbox`, Delphi and FPC): SQLite through pascal-db-faa,
+  the outbox, an index on the mock, Meilisearch or Typesense, searches and a reindex.
+- Guides (`docs/README.md`): getting started, schema and documents, writing and waiting,
+  searching, errors, testing with the mock, the outbox bridge, what each engine does
+  differently.
+- Unit suite: 156 tests (core, the contract suite on the mock, the mock's own, both adapters on
+  a fake transport, the outbox bridge on the mock). Integration suite: 66 tests, run once with
+  the contract suite on Meilisearch and once on Typesense (`SEARCH_CONTRACT_ENGINE`), with both
+  adapters' own tests and the outbox bridge end to end on SQLite; engines in Docker, http and
+  https with a private CA (`tools/engines.sh`). DUnitX masters and generated FPCUnit mirrors.

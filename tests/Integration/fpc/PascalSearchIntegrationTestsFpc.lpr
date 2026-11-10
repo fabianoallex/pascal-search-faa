@@ -3,7 +3,8 @@
 { FPCUnit runner for the integration tests. Same coverage as the DUnitX
   suite (tests/Integration/PascalSearch.IntegrationSuite.dpr): the contract
   suite on Meilisearch or Typesense (SEARCH_CONTRACT_ENGINE) plus both
-  adapters' own tests, the fixtures generated
+  adapters' own tests and the outbox bridge end to end (SQLite through
+  SQLdb; SEARCH_SQLITE_CLIENT names the library), the fixtures generated
   from the DUnitX masters by tools/gen_fpc_mirror.py. The contract suite's
   mirror lives in tests/Unit/fpc, hence the paths below. Needs the engines
   (sh tools/engines.sh; PascalSearch.IntegrationEnv for other addresses).
@@ -29,7 +30,8 @@ uses
   PascalSearch.ContractTests in '../../Unit/fpc/PascalSearch.ContractTests.pas',
   PascalSearch.IntegrationEnv in '../PascalSearch.IntegrationEnv.pas',
   PascalSearch.MeilisearchIntegrationTests,
-  PascalSearch.TypesenseIntegrationTests;
+  PascalSearch.TypesenseIntegrationTests,
+  PascalSearch.OutboxIntegrationTests;
 
 var
   ConsoleApp: TTestRunner;

@@ -1,0 +1,29 @@
+
+saved 1: Café com leite
+saved 2: Café expresso
+saved 3: Pão de queijo
+rolled back 4: Café gelado (its event went with it)
+t=1000 relay: 3 event(s) delivered; local sink: 3 handler run(s) done
+
+search "café", by price: 2 hit(s)
+  2 Café expresso 5.00
+  1 Café com leite 7.50
+  facet category: bebida=2
+search "", category salgado, by price: 1 hit(s)
+  3 Pão de queijo 4.00
+  facet category: salgado=1
+
+saved 1: Café com leite
+deleted 3
+t=1002 relay: 2 event(s) delivered; local sink: 2 handler run(s) done
+search "café", by price: 2 hit(s)
+  1 Café com leite 4.50
+  2 Café expresso 5.00
+  facet category: bebida=2
+
+reindexed: 2 product(s)
+search "", by price: 2 hit(s)
+  1 Café com leite 4.50
+  2 Café expresso 5.00
+  facet category: bebida=2
+purged: 5 delivered event(s)

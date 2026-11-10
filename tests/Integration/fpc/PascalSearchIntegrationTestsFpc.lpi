@@ -37,6 +37,14 @@
         <DefaultFilename Value="..\..\..\external\pascal-jsonmapper-faa\packages\pascaljsonmapper_pkg.lpk" Prefer="True"/>
       </Item>
       <Item>
+        <PackageName Value="pascal_db_faa"/>
+        <DefaultFilename Value="..\..\..\external\pascal-db-faa\packages\pascal_db_faa.lpk" Prefer="True"/>
+      </Item>
+      <Item>
+        <PackageName Value="pascal_db_faa_sqldb"/>
+        <DefaultFilename Value="..\..\..\external\pascal-db-faa\packages\pascal_db_faa_sqldb.lpk" Prefer="True"/>
+      </Item>
+      <Item>
         <PackageName Value="pascal_search_faa"/>
         <DefaultFilename Value="..\..\..\packages\pascal_search_faa.lpk"/>
       </Item>
@@ -47,6 +55,10 @@
       <Item>
         <PackageName Value="pascal_search_faa_typesense"/>
         <DefaultFilename Value="..\..\..\packages\pascal_search_faa_typesense.lpk"/>
+      </Item>
+      <Item>
+        <PackageName Value="pascal_search_faa_outbox"/>
+        <DefaultFilename Value="..\..\..\packages\pascal_search_faa_outbox.lpk"/>
       </Item>
       <Item>
         <PackageName Value="FPCUnitTestRunner"/>

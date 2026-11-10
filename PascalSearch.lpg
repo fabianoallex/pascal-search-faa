@@ -5,12 +5,18 @@
       <Target FileName="packages\pascal_search_faa.lpk"/>
       <Target FileName="packages\pascal_search_faa_meilisearch.lpk"/>
       <Target FileName="packages\pascal_search_faa_typesense.lpk"/>
+      <Target FileName="packages\pascal_search_faa_outbox.lpk"/>
       <Target FileName="tests\Unit\fpc\PascalSearchUnitTestsFpc.lpi">
         <BuildModes>
           <Mode Name="Default"/>
         </BuildModes>
       </Target>
       <Target FileName="tests\Integration\fpc\PascalSearchIntegrationTestsFpc.lpi">
+        <BuildModes>
+          <Mode Name="Default"/>
+        </BuildModes>
+      </Target>
+      <Target FileName="samples\01-outbox\SearchOutbox.lpi">
         <BuildModes>
           <Mode Name="Default"/>
         </BuildModes>

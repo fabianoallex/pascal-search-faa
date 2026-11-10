@@ -5,6 +5,7 @@ proposed defaults: milliseconds, words-only text, every word required, the commo
 Core and mock implemented the same day (section 8 lists what the implementation settled). The
 Meilisearch adapter followed on 2026-11-10, on pascal-common-faa 1.31.0's HTTP client (section 9),
 and the Typesense adapter the same day (section 10): the contract suite passed on it unchanged.
+The outbox bridge's decisions were accepted on 2026-11-10, as proposed (section 11).
 Every decision is numbered (S1...).
 "Finding N" points to [`engine-findings.md`](engine-findings.md) (Meilisearch 1.56.2 and
 Typesense 30.2, measured through FPC 3.2.2 on Linux).
@@ -28,7 +29,7 @@ A contract for external search engines, one adapter per engine, and an in-memory
 | `pascal_search_faa` (core, `src/`) | `PascalSearch.Version`, `.Interfaces`, `.Schema`, `.Documents`, `.Filters`, `.Errors`, `.Values`, `.Query`, `.Mock`, `.EngineJson` | pascal-common-faa 1.20.0+ (`PcFoldForSearch`, `PcLowerCase`), pascal-jsonmapper-faa 0.7.0+ (JSON DOM, DTO mapping) |
 | `pascal_search_faa_meilisearch` (`adapters/meilisearch/`) | `PascalSearch.Meilisearch` | core, pascal-common-faa 1.31.0+ (`PascalCommon.Http`, `TSleep`/`TTicker`) |
 | `pascal_search_faa_typesense` (`adapters/typesense/`) | `PascalSearch.Typesense` | core, pascal-common-faa 1.31.0+ |
-| `pascal_search_faa_outbox` (later, step 7) | `PascalSearch.Outbox` | core, pascal-db-faa |
+| `pascal_search_faa_outbox` (`bridges/outbox/`) | `PascalSearch.Outbox` | core, pascal-db-faa 0.18.0+ (`PascalDb.Outbox`) |
 
 **S1. JSON through pascal-jsonmapper-faa.** Its DOM (`TJsonValue`) gives the same text on both
 compilers, keeps number text (an Int64 id survives) and always writes `.` as decimal separator
@@ -135,8 +136,9 @@ pascal-common-faa's replaceable `TSleep` (no real sleep in unit tests).
 **S7. Failures are per document, with a flag for "the whole batch".**
 `ESearchWriteFailed.Failures: TArray<TSearchFailure>` (`Id`, `Code`, `Message`). Typesense keeps
 the good documents of an import and lists the bad ones (finding 5); a Meilisearch task is all or
-nothing (finding 2), so every id of the batch is listed and `WholeBatch` is `True`. An outbox
-handler retries the whole batch on `WholeBatch`, only the failed ids otherwise.
+nothing (finding 2), so every id of the batch is listed and `WholeBatch` is `True`. The outbox
+bridge doesn't need the difference: it retries the whole event, and rewriting the documents that
+went through does no harm (section 11).
 
 **S8. Upsert replaces the document; delete is idempotent.** Upsert maps to Meilisearch
 `POST /documents` and Typesense `import?action=upsert` (finding 6). Deleting a missing id is not an
@@ -417,3 +419,63 @@ with the probe's hostile values (quotes, backslashes, backticks, `||`, `&&`).
   request error, and `Get` of a missing document is nil.
 - **The integration runner runs the contract suite once per engine**
   (`SEARCH_CONTRACT_ENGINE`), with both adapters' own tests each time.
+
+## 11. The outbox bridge (0.1.0)
+
+Accepted on 2026-11-10, every point as proposed. It keeps a search index in step with the
+database through pascal-db-faa's transactional outbox (its `docs/outbox.md`): the application
+enqueues an event with the changed ids in the transaction that changed them, and the bridge
+writes those ids' current state to the index.
+
+Three facts of pascal-db-faa 0.20.1 shaped it:
+- a handler can't send a delivery to `dead` at once: a delivery is dead after `MaxAttempts`
+  tries, or when no handler of its name is in the process; `Handle` can only raise;
+- one `TOutboxLocalSink` per database: `OUTBOX_DELIVERY.CLAIM` doesn't filter by handler, and a
+  sink that claims another handler's delivery marks it dead. So `MaxAttempts` is the same for
+  every handler; with the default (10 tries, 5 s doubling up to 600 s) a search engine down for
+  about 30 minutes leaves dead deliveries;
+- `PascalDb.Outbox` hasn't changed since it came in 0.18.0.
+
+- **A handler, not a sink.** `TSearchOutboxHandler` is an `IOutboxHandler` for the local sink.
+  An `IOutboxSink` runs in the relay's transaction (held through the HTTP calls and the wait: on
+  SQLite the database's one write lock) and would take the local sink's place, so no e-mail or
+  other handler next to it. With the handler, an engine down delays only its deliveries, retried
+  with the outbox's backoff; past `MaxAttempts` they are dead, and the way back is a resync
+  (below). The guide says so and suggests a larger `MaxAttempts`.
+- **Its own package and folder**, `bridges/outbox/` (`pascal_search_faa_outbox.lpk`): the core
+  doesn't depend on pascal-db-faa. pascal-db-faa 0.18.0 or later (checked in the unit);
+  measured with 0.20.1.
+- **From event to ids.** The handler is built with a name (the outbox stores it with each
+  delivery: 1-60 characters), the index, the kinds it accepts and a document loader. The
+  payload is `{"ids":[...]}` or `{"id":...}`, each id a string or an integer (an integer becomes
+  its decimal text); `SearchOutboxPayload(Ids)` writes the first form. A reader callback takes any
+  other payload. The ids are checked (S5) before anything is loaded; duplicates are dropped.
+- **The loader decides, not the kind.** `TSearchDocumentLoader` receives the ids and returns the
+  documents of those that exist; an id with no document is deleted from the index. A `saved`
+  and a `deleted` event handled out of order both end in the database's current state. A
+  document whose id wasn't asked for, or one returned twice, is a bug in the loader
+  (`ESearchArgumentError`). Callbacks follow `PASCALSEARCH_FUNCREFS` (S22).
+- **`Sync(Ids)` is the work, public**: load, upsert those found, delete the others, wait for
+  both. `Handle` reads the ids and calls it.
+- **Every error is raised, and the outbox retries.** A retry reloads and rewrites every id of the
+  event: upsert and delete are idempotent, and the reload reads the current state. So
+  `WholeBatch` or some ids (Typesense) make no difference to the bridge: the outbox keeps no
+  per-id state, and rewriting the good ones does no harm. `ESearchUnavailable` and
+  `ESearchTimeout` are resent by the next try (the adapters never resend a write themselves,
+  section 9). `ESearchArgumentError` and `ESearchRequestError` use the 10 tries before going
+  dead, `OnError` reporting each; an exception the local sink marks dead at once would be a
+  pascal-db-faa change, left for later.
+- **Always `WaitFor`** (S6), both writes sent first and then waited; the limit is the handler's
+  `WaitTimeoutMs` (0: the engine's default).
+- **One sink worker writes an index.** Two sink processes running the same handler in parallel
+  could write an older state after a newer one (each loads, then writes). One sink handles its
+  deliveries in sequence, and a retry reloads, so this doesn't happen there. The guide says so.
+- **No reindex routine.** A full reindex, or the recovery of dead deliveries, is the
+  application's loop over its ids in pages, calling `Sync`. In place it leaves documents whose
+  rows are gone (the library can't list an index past `MaxHits`); dropping the index first
+  removes them but leaves it empty while it fills. The guide and the sample show the loop.
+- **Tests without a server or a database**: `Handle` takes a `TOutboxEvent` record, so the unit
+  suite builds events and runs the handler on `TMockSearchEngine` (`DeferWrites` proves the wait;
+  `FailNextWrite` and `Unavailable` that errors are raised). The whole path (`Enqueue` in a
+  transaction, the relay, the local sink, the handler, a real engine) runs in the integration
+  suite on SQLite.

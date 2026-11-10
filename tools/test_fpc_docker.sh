@@ -18,19 +18,20 @@ MOUNT="$ROOT"
 command -v cygpath >/dev/null 2>&1 && MOUNT="$(cygpath -w "$ROOT")"
 
 cd "$ROOT"
-for M in pascal-common-faa/src/PascalCommon.Text.pas pascal-jsonmapper-faa/src/PascalJsonMapper.Json.pas; do
+for M in pascal-common-faa/src/PascalCommon.Text.pas pascal-jsonmapper-faa/src/PascalJsonMapper.Json.pas pascal-db-faa/src/PascalDb.Outbox.pas; do
   [ -f "external/$M" ] || { echo "external/ is empty: git submodule update --init"; exit 1; }
 done
 python tools/gen_fpc_mirror.py --check
 
 MSYS_NO_PATHCONV=1 docker run --rm -v "$MOUNT:/src:ro" "$IMAGE" sh -c '
   set -e
-  mkdir -p /t/u /t/external && cp -r /src/src /src/adapters /src/tests /t/
-  cp -r /src/external/pascal-common-faa /src/external/pascal-jsonmapper-faa /t/external/
+  mkdir -p /t/u /t/external && cp -r /src/src /src/adapters /src/bridges /src/tests /t/
+  cp -r /src/external/pascal-common-faa /src/external/pascal-jsonmapper-faa /src/external/pascal-db-faa /t/external/
   C=/t/external/pascal-common-faa/src
   J=/t/external/pascal-jsonmapper-faa/src
+  D=/t/external/pascal-db-faa/src
   cd /t/tests/Unit/fpc
-  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu/t/adapters/typesense -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Unit -FU/t/u -gh -gl \
+  fpc -v0 -Mdelphi -Fu/t/src -Fi/t/src -Fu/t/adapters/meilisearch -Fu/t/adapters/typesense -Fu/t/bridges/outbox -Fu$D -Fi$D -Fu$C -Fi$C -Fu$J -Fi$J -Fu/t/tests/Unit -FU/t/u -gh -gl \
     -o/t/runner PascalSearchUnitTestsFpc.lpr > /t/build.log 2>&1 \
     || { grep -iE "error|fatal" /t/build.log | head -30; exit 1; }
   cd /t

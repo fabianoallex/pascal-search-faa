@@ -2,6 +2,7 @@
 lib/
 lib-meilisearch/
 lib-typesense/
+lib-outbox/
 backup/
 *.exe
 *.o
@@ -20,6 +21,10 @@ linux/
 # ELF binary (no extension) produced by lazbuild on Linux in the project folder
 tests/Unit/fpc/PascalSearchUnitTestsFpc
 tests/Integration/fpc/PascalSearchIntegrationTestsFpc
+
+# the outbox bridge's integration tests: a SQLite database next to the runner
+*.sqlite
+*.sqlite-journal
 
 # test script logs
 tests/Unit/fpc/build.log

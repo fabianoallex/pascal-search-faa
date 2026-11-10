@@ -17,7 +17,7 @@ if [ -z "${FPC_IMAGE:-}" ]; then
   FPC_IMAGE=pascalsearch-fpc322
   docker build -q -t "$FPC_IMAGE" - <<'EOF' >/dev/null
 FROM debian:bookworm
-RUN apt-get update && apt-get install -y --no-install-recommends fpc libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends fpc libssl3 libsqlite3-0 && rm -rf /var/lib/apt/lists/*
 EOF
 fi
 export FPC_IMAGE

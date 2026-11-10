@@ -1,7 +1,9 @@
 ﻿program PascalSearch.UnitTests;
 
 { DUnitX runner for the unit tests. No search engine needed: the contract
-  suite runs on TMockSearchEngine (PascalSearch.ContractEnv's default).
+  suite runs on TMockSearchEngine (PascalSearch.ContractEnv's default), and
+  the outbox bridge's tests need no database (pascal-db-faa's units come
+  from external/pascal-db-faa/src, on the search path).
 
   The sibling FPCUnit suite lives in tests/Unit/fpc, with the same coverage
   and identical test bodies: the files there are GENERATED from these by
@@ -28,13 +30,15 @@ uses
   PascalSearch.EngineJson in '..\..\src\PascalSearch.EngineJson.pas',
   PascalSearch.Meilisearch in '..\..\adapters\meilisearch\PascalSearch.Meilisearch.pas',
   PascalSearch.Typesense in '..\..\adapters\typesense\PascalSearch.Typesense.pas',
+  PascalSearch.Outbox in '..\..\bridges\outbox\PascalSearch.Outbox.pas',
   PascalSearch.DUnitXCompat in 'PascalSearch.DUnitXCompat.pas',
   PascalSearch.ContractEnv in 'PascalSearch.ContractEnv.pas',
   PascalSearch.CoreTests in 'PascalSearch.CoreTests.pas',
   PascalSearch.ContractTests in 'PascalSearch.ContractTests.pas',
   PascalSearch.MockTests in 'PascalSearch.MockTests.pas',
   PascalSearch.MeilisearchTests in 'PascalSearch.MeilisearchTests.pas',
-  PascalSearch.TypesenseTests in 'PascalSearch.TypesenseTests.pas';
+  PascalSearch.TypesenseTests in 'PascalSearch.TypesenseTests.pas',
+  PascalSearch.OutboxTests in 'PascalSearch.OutboxTests.pas';
 
 var
   runner: ITestRunner;

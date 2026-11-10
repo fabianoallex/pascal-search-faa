@@ -25,7 +25,8 @@ uses
   PascalSearch.ContractTests,
   PascalSearch.MockTests,
   PascalSearch.MeilisearchTests,
-  PascalSearch.TypesenseTests;
+  PascalSearch.TypesenseTests,
+  PascalSearch.OutboxTests;
 
 var
   ConsoleApp: TTestRunner;

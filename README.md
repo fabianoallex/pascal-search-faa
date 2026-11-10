@@ -3,11 +3,13 @@
 A search-engine contract for **Delphi and Lazarus/FPC** from one codebase: a declared schema,
 documents with string ids, batched upsert and delete, typed filters (never filter text), text
 search with sort, paging and facets, and waiting until a write is searchable. Adapters per
-engine (Meilisearch first, Typesense to validate the contract) and an in-memory mock for tests.
+engine (Meilisearch first, Typesense to validate the contract), an in-memory mock for tests,
+and a bridge that keeps an index in step with the database through pascal-db-faa's
+transactional outbox.
 
-**Status: 0.1.0, unreleased.** The core, the mock and both adapters (Meilisearch, Typesense)
-are done; the same contract suite passes on the mock and on both engines. Versions stay 0.x
-until the first release.
+**Status: 0.1.0.** The core, the mock, both adapters (Meilisearch, Typesense) and the outbox
+bridge are done; the same contract suite passes on the mock and on both engines. Versions stay
+0.x while the contract may still change. **Guides: [`docs/README.md`](docs/README.md).**
 
 Part of the `*-faa` family (MIT, Delphi 12 and FPC 3.2.2, `{$MODE DELPHI}`). Not an adapter of
 pascal-db-faa: a search engine is HTTP + JSON with asynchronous writes. A database's own
@@ -91,6 +93,24 @@ uses PascalSearch.Typesense;
 - `(Engine as ITypesenseEngine).Send(Method, Path, Body)` reaches any endpoint (synonym sets,
   curation...).
 
+## Keeping an index in step with the database
+
+```pascal
+uses PascalDb.Outbox, PascalSearch.Outbox;
+
+  // In the transaction that changes the product:
+  TOutbox.Enqueue(LFactory, LQuery, LTenant, 'product.saved',
+    SearchOutboxPayload([IntToStr(LId)]), LNow);
+
+  // In the worker, one of pascal-db-faa's local sink handlers:
+  LSink.AddHandler(TSearchOutboxHandler.Create('search.products', Engine.Index('products'),
+    ['product.saved', 'product.deleted'], LCatalog.LoadSearchDocuments));
+```
+
+The handler loads the ids' current rows (the loader is yours), upserts those found, deletes the
+others and waits for both writes; any failure is retried by the outbox. Guide:
+[`docs/outbox.md`](docs/outbox.md); sample: [`samples/01-outbox`](samples/01-outbox/SearchOutbox.dpr).
+
 ## Contents
 
 | Unit | What |
@@ -107,8 +127,9 @@ uses PascalSearch.Typesense;
 | `PascalSearch.EngineJson` | JSON helpers the adapters share |
 | `PascalSearch.Meilisearch` | the Meilisearch adapter (`adapters/meilisearch`, own package) |
 | `PascalSearch.Typesense` | the Typesense adapter (`adapters/typesense`, own package) |
+| `PascalSearch.Outbox` | the outbox bridge (`bridges/outbox`, own package; needs pascal-db-faa) |
 
-Docs: [`design.md`](docs/design.md) (decisions S1-S24; sections 8-10 what the
+Docs: the guides in [`docs/README.md`](docs/README.md); [`design.md`](docs/design.md) (decisions S1-S24; sections 8-11 what the
 implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 (what Meilisearch 1.56.2 and Typesense 30.2 did when probed), [`gotchas.md`](docs/gotchas.md).
 
@@ -116,10 +137,12 @@ implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0+ (1.31.0+ with an
 adapter) and [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa)
-0.7.0+, each as the application's own submodule. Delphi: add `src/` of this library and of both
-to the search path, plus `adapters/meilisearch` or `adapters/typesense` for an engine. Lazarus:
-`packages/pascal_search_faa.lpk`, plus `pascal_search_faa_meilisearch.lpk` or
-`pascal_search_faa_typesense.lpk`.
+0.7.0+, each as the application's own submodule; the outbox bridge also
+[pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.18.0+. Delphi: add `src/` of
+this library and of both to the search path, plus `adapters/meilisearch` or
+`adapters/typesense` for an engine, `bridges/outbox` and pascal-db-faa's `src/` for the bridge.
+Lazarus: `packages/pascal_search_faa.lpk`, plus `pascal_search_faa_meilisearch.lpk`,
+`pascal_search_faa_typesense.lpk` or `pascal_search_faa_outbox.lpk`.
 
 ## Tests
 
@@ -128,8 +151,11 @@ to the search path, plus `adapters/meilisearch` or `adapters/typesense` for an e
 - Integration suite (the contract on Meilisearch and on Typesense, TLS included):
   `sh tools/engines.sh` starts the engines in Docker (`down` removes them); then
   `sh tools/test_fpc.sh integration`, or Delphi `tests/Integration/PascalSearch.IntegrationSuite.dproj`
-  run once per engine (`SEARCH_CONTRACT_ENGINE=meilisearch` or `typesense`). On Linux,
-  `sh tools/test_integration_docker.sh` does it all.
+  run once per engine (`SEARCH_CONTRACT_ENGINE=meilisearch` or `typesense`). The outbox bridge's
+  tests there use a SQLite file: FireDAC links SQLite in; on FPC, `SEARCH_SQLITE_CLIENT` names
+  the library when the default search doesn't find one (on Windows, a sqlite.org DLL of the
+  runner's bitness). On Linux, `sh tools/test_integration_docker.sh` does it all, and runs
+  sample 01 on the mock and both engines.
 - Everything CI runs: `sh tools/ci-test.sh`.
 
 Criterion on both: every test green and 0 leaks.

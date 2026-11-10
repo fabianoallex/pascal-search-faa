@@ -68,7 +68,7 @@
         <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;$(DCC_Namespace)</DCC_Namespace>
-        <DCC_UnitSearchPath>$(DUnitX);..\..\src;..\..\adapters\meilisearch;..\..\adapters\typesense;..\..\external\pascal-common-faa\src;..\..\external\pascal-jsonmapper-faa\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+        <DCC_UnitSearchPath>$(DUnitX);..\..\src;..\..\adapters\meilisearch;..\..\adapters\typesense;..\..\bridges\outbox;..\..\external\pascal-common-faa\src;..\..\external\pascal-jsonmapper-faa\src;..\..\external\pascal-db-faa\src;..\..\external\pascal-db-faa\adapters\firedac;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <SanitizedProjectName>PascalSearch_IntegrationSuite</SanitizedProjectName>
         <UsingDelphiRTL>true</UsingDelphiRTL>
     </PropertyGroup>
@@ -125,12 +125,14 @@
         <DCCReference Include="..\..\src\PascalSearch.EngineJson.pas"/>
         <DCCReference Include="..\..\adapters\meilisearch\PascalSearch.Meilisearch.pas"/>
         <DCCReference Include="..\..\adapters\typesense\PascalSearch.Typesense.pas"/>
+        <DCCReference Include="..\..\bridges\outbox\PascalSearch.Outbox.pas"/>
         <DCCReference Include="..\Unit\PascalSearch.DUnitXCompat.pas"/>
         <DCCReference Include="..\Unit\PascalSearch.ContractEnv.pas"/>
         <DCCReference Include="..\Unit\PascalSearch.ContractTests.pas"/>
         <DCCReference Include="PascalSearch.IntegrationEnv.pas"/>
         <DCCReference Include="PascalSearch.MeilisearchIntegrationTests.pas"/>
         <DCCReference Include="PascalSearch.TypesenseIntegrationTests.pas"/>
+        <DCCReference Include="PascalSearch.OutboxIntegrationTests.pas"/>
         <BuildConfiguration Include="Base">
             <Key>Base</Key>
         </BuildConfiguration>

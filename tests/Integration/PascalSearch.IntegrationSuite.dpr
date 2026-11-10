@@ -3,7 +3,9 @@
 { DUnitX runner for the integration tests: the contract suite
   (tests/Unit/PascalSearch.ContractTests.pas) pointed at Meilisearch or Typesense
   (SEARCH_CONTRACT_ENGINE) through PascalSearch.ContractEnv, plus both
-  adapters' own tests. Needs the engines:
+  adapters' own tests, and the outbox bridge end to end on a SQLite
+  database (FireDAC; pascal-db-faa's units come from external/pascal-db-faa,
+  on the search path). Needs the engines:
   "sh tools/engines.sh" starts them in Docker on this machine (host ports
   17700 and 17701); PascalSearch.IntegrationEnv says how to point elsewhere.
 
@@ -30,12 +32,14 @@ uses
   PascalSearch.EngineJson in '..\..\src\PascalSearch.EngineJson.pas',
   PascalSearch.Meilisearch in '..\..\adapters\meilisearch\PascalSearch.Meilisearch.pas',
   PascalSearch.Typesense in '..\..\adapters\typesense\PascalSearch.Typesense.pas',
+  PascalSearch.Outbox in '..\..\bridges\outbox\PascalSearch.Outbox.pas',
   PascalSearch.DUnitXCompat in '..\Unit\PascalSearch.DUnitXCompat.pas',
   PascalSearch.ContractEnv in '..\Unit\PascalSearch.ContractEnv.pas',
   PascalSearch.ContractTests in '..\Unit\PascalSearch.ContractTests.pas',
   PascalSearch.IntegrationEnv in 'PascalSearch.IntegrationEnv.pas',
   PascalSearch.MeilisearchIntegrationTests in 'PascalSearch.MeilisearchIntegrationTests.pas',
-  PascalSearch.TypesenseIntegrationTests in 'PascalSearch.TypesenseIntegrationTests.pas';
+  PascalSearch.TypesenseIntegrationTests in 'PascalSearch.TypesenseIntegrationTests.pas',
+  PascalSearch.OutboxIntegrationTests in 'PascalSearch.OutboxIntegrationTests.pas';
 
 var
   runner: ITestRunner;

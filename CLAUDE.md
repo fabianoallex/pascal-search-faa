@@ -16,23 +16,29 @@ This file records only what is specific to this repository.
 
 ## Where things stand (2026-11-10)
 
-- **Decisions**: `docs/design.md` (S1-S24, accepted; sections 8, 9 and 10 are what the core,
-  the Meilisearch adapter and the Typesense adapter settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
-  "finding N". Read both before changing the contract.
-- **Done**: core (`src/`) and mock; the Meilisearch and Typesense adapters
+- **Decisions**: `docs/design.md` (S1-S24, accepted; sections 8-11 are what the core, the
+  Meilisearch adapter, the Typesense adapter and the outbox bridge settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
+  "finding N". Read both before changing the contract. **Guides** for users: `docs/README.md`.
+- **Done (0.1.0)**: core (`src/`) and mock; the Meilisearch and Typesense adapters
   (`adapters/meilisearch`, `adapters/typesense`, each its own package) on pascal-common-faa
-  1.31.0's `PascalCommon.Http`. Unit suite 135/135; integration suite 63/63 twice (the
-  contract suite on Meilisearch, then on Typesense, plus both adapters' tests; engines in
-  Docker, http and https with a private CA), 0 leaks, on FPC Linux and Windows. Delphi: the
-  user compiles both suites in the IDE; the `.exe` can be run from here.
+  1.31.0's `PascalCommon.Http`; the outbox bridge (`bridges/outbox`, its own package, on
+  pascal-db-faa 0.20.1 in `external/`, minimum 0.18.0); sample `samples/01-outbox`; the guides.
+  Unit suite 156/156; integration suite 66/66 twice (the contract suite on Meilisearch, then on
+  Typesense, plus both adapters' tests and the bridge end to end on SQLite; engines in Docker,
+  http and https with a private CA), and the sample's output on the mock and both engines, 0
+  leaks, on FPC Linux and Windows, and on Delphi 12 Win32 and Win64 (the user compiles both
+  suites and the sample in the IDE; the `.exe` can be run from here).
 - **HTTP**: only through `PascalCommon.Http` (pascal-common-faa 1.31.0+): one transport per
   engine, kept alive; tests on `TPcFakeHttpTransport`. Paths and queries encoded with
   `PcPercentEncode`. A POST is never sent twice by the transport, and the adapters don't
   repeat a write either (design, section 9).
 - **Typesense keeps the library's schema in the collection's metadata** (design, section 10):
   the adapter checks filter/sort/facet fields and builds `query_by` from it.
-- **Next**: the outbox bridge (a separate package depending on pascal-db-faa), sample and
-  guide, then the entry in the skill's `faa-libraries.md` once a version is published.
+- **The outbox bridge is a handler of pascal-db-faa's local sink** (design, section 11): the
+  loader decides (an id without a document is deleted), every error is raised for the outbox
+  to retry, a reindex is the application's loop over `Sync`.
+- **Next**: the tag `v0.1.0` (only when the user asks), then the entry in the skill's
+  `faa-libraries.md` and the line in `using-faa-libraries`' minimum-version matrix.
 
 ---
 
@@ -44,10 +50,12 @@ on purpose (`'Café'`, `'Água'`).
 
 ---
 
-## Code rules (every unit in `src/` and `adapters/`)
+## Code rules (every unit in `src/`, `adapters/` and `bridges/`)
 
 - **Each adapter is its own package** (`adapters/<engine>/`, `pascal_search_faa_<engine>.lpk`):
   the core needs pascal-common-faa 1.20.0, an adapter 1.31.0 (`$MESSAGE FATAL` in its unit).
+  The outbox bridge too (`bridges/outbox/`, `pascal_search_faa_outbox.lpk`): only it depends on
+  pascal-db-faa (0.18.0, checked in the unit); the core never does.
 
 - **Every `.pas` is UTF-8 with a BOM** (a file written by a tool has none: add it). Delphi reads
   a file without one as ANSI and garbles accented literals (gotcha 9).
@@ -102,6 +110,12 @@ on purpose (`'Café'`, `'Água'`).
   user compiles `tests/Unit/PascalSearch.UnitTests.dproj` and
   `tests/Integration/PascalSearch.IntegrationSuite.dproj` in the IDE (Delphi CE has no
   command-line compiler) and runs the `.exe`. Criterion: all green, 0 leaks, on both.
+- The outbox bridge's integration tests and sample 01 use a SQLite file next to the program.
+  FireDAC links SQLite in; SQLdb on Windows needs a 64-bit sqlite.org DLL:
+  `SEARCH_SQLITE_CLIENT` (tests) / `SEARCH_SAMPLE_SQLITE_CLIENT` (sample), e.g. pascal-db-faa's
+  `.deps/sqlite-3.53.4/x64/sqlite3.dll` in the sibling checkout. The Linux scripts install
+  `libsqlite3-0`; `test_integration_docker.sh` also checks the sample's output against
+  `samples/01-outbox/expected.txt` on the mock and both engines.
 - New `.dproj` go into `PascalSearch.groupproj`, new `.lpi` into `PascalSearch.lpg`.
 
 ---
