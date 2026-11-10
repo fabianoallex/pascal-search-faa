@@ -37,8 +37,9 @@ This file records only what is specific to this repository.
 - **The outbox bridge is a handler of pascal-db-faa's local sink** (design, section 11): the
   loader decides (an id without a document is deleted), every error is raised for the outbox
   to retry, a reindex is the application's loop over `Sync`.
-- **Next**: the tag `v0.1.0` (only when the user asks), then the entry in the skill's
-  `faa-libraries.md` and the line in `using-faa-libraries`' minimum-version matrix.
+- **Released**: `v0.1.0` (2026-11-10), listed in the skill's `faa-libraries.md` and in
+  `using-faa-libraries`' minimum-version matrix. A release that changes a minimum version
+  updates that matrix too.
 
 ---
 
