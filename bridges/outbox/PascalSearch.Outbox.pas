@@ -35,12 +35,18 @@
      id of the event: upsert and delete are idempotent, so a write that
      partly went through (Typesense) or got no answer (ESearchUnavailable;
      the adapters never send a write twice) is simply done again.
+   - Except a bug in the caller (design S30): Handle turns
+     ESearchArgumentError (a bad payload or id, a loader returning what it
+     wasn't asked) and ESearchRequestError (a request the engine refused)
+     into pascal-db-faa's EOutboxGiveUp, "ClassName: message", and the local
+     sink marks the delivery dead at once: the same try would fail the same
+     way. Sync raises the library's own errors (a reindex loop calls it).
    - Run one sink worker for an index: two loading and writing the same ids
      in parallel could write an older state after a newer one.
 
    TSearchDocumentLoader and TSearchOutboxIdsReader are "reference to" on
    Delphi and "of object" on FPC 3.2.2 (PASCALSEARCH_FUNCREFS): a method
-   compiles on both. Needs pascal-db-faa 0.18.0 or later. *)
+   compiles on both. Needs pascal-db-faa 0.21.0 or later (EOutboxGiveUp). *)
 
 interface
 
@@ -80,7 +86,9 @@ type
       const AKinds: array of string; const ALoader: TSearchDocumentLoader);
     function Name: string;
     function Accepts(const AKind: string): Boolean;
-    /// Reads the event's ids and calls Sync. Raises to fail this try.
+    /// Reads the event's ids and calls Sync. Raises to fail this try;
+    /// EOutboxGiveUp (dead at once) for ESearchArgumentError and
+    /// ESearchRequestError.
     procedure Handle(const AEvent: TOutboxEvent);
     /// Loads AIds, upserts the documents found, deletes the other ids and
     /// waits for both writes. Also the step of a full reindex.
@@ -109,8 +117,8 @@ uses
   PascalJsonMapper.Json,
   PascalSearch.Errors;
 
-{$IF PASCALDB_VERSION < 1800}
-  {$MESSAGE FATAL 'pascal-search-faa''s outbox bridge needs pascal-db-faa 0.18.0 or later (PascalDb.Outbox)'}
+{$IF PASCALDB_VERSION < 2100}
+  {$MESSAGE FATAL 'pascal-search-faa''s outbox bridge needs pascal-db-faa 0.21.0 or later (EOutboxGiveUp)'}
 {$IFEND}
 
 function IdOf(AValue: TJsonValue): string;
@@ -230,10 +238,18 @@ end;
 
 procedure TSearchOutboxHandler.Handle(const AEvent: TOutboxEvent);
 begin
-  if Assigned(FIdsReader) then
-    Sync(FIdsReader(AEvent))
-  else
-    Sync(SearchOutboxIds(AEvent.Payload));
+  try
+    if Assigned(FIdsReader) then
+      Sync(FIdsReader(AEvent))
+    else
+      Sync(SearchOutboxIds(AEvent.Payload));
+  except
+    // A bug in the caller: trying again would fail the same way.
+    on E: ESearchArgumentError do
+      raise EOutboxGiveUp.Create(E.ClassName + ': ' + E.Message);
+    on E: ESearchRequestError do
+      raise EOutboxGiveUp.Create(E.ClassName + ': ' + E.Message);
+  end;
 end;
 
 procedure TSearchOutboxHandler.Sync(const AIds: array of string);

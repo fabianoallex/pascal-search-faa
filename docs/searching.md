@@ -60,14 +60,61 @@ disagree, design S12). String equality is case-insensitive; accents depend on th
 - **Fields**: `Fields([...])` limits what comes back; empty means every stored field. The id
   always comes back.
 - `Get(Id)` returns the hit or nil; `GetMany(Ids)` the ones found, in the order asked.
+- `ListIds(Filter)` lists every id, past `MaxHits` (guide 9).
+
+## Highlight
+
+```pascal
+R := Products.Search('café').Highlight(['title', 'body']).Execute;
+if R.Hit(0).FindHighlight('title', H) then
+  Html := H.ToHtml;            // 'Pão &lt;b&gt; <mark>café</mark>...'
+```
+
+- `Highlight([...])` names **Text fields** whose matched words each hit returns, with the
+  field's whole value. The mock and Typesense refuse another field (`ESearchRequestError`);
+  Meilisearch would highlight it anyway.
+- `FindHighlight(Field, H)` is `False` when the field wasn't asked, the text was empty or
+  nothing in the field matched.
+- `H.Parts` is the value cut where the engine marked a match (`Text`, `Matched`); `H.Text` is
+  the plain value. **`H.ToHtml(Pre, Post)` escapes `& < > " '` in every part** and puts the
+  matched ones between `Pre` and `Post` (`<mark>` and `</mark>` by default). Neither engine
+  escapes HTML (finding 64): the library never hands out the engine's tagged text, so a value
+  holding `<script>` can't reach a page unescaped.
+- What is marked is the engine's: a prefix marks the matched start (`<mark>Caf</mark>é`), a
+  typo or a folded accent the whole word. The mock marks whole words and the prefix of the last
+  word, and has no typos.
+- The field doesn't have to be among `Fields([...])`. Cropping to a snippet differs between the
+  engines (finding 65): native access.
+
+## Synonyms
+
+```pascal
+Products.SetSynonyms([
+  TSearchSynonym.Equivalent(['tv', 'televisão']),             // each finds the others
+  TSearchSynonym.OneWay('geladeira', ['refrigerador']),       // geladeira finds refrigerador, not back
+  TSearchSynonym.Equivalent(['café preto', 'expresso'])]);    // several words
+```
+
+- `SetSynonyms` **replaces** every group of the index (`[]` clears them) and returns once the
+  engine applies them to searches; no reindex. Case and accents don't matter.
+- Checked at the call (`ESearchArgumentError`): no blank word, two words or more in an
+  equivalent group, one or more after a one-way root.
+- Meilisearch keeps them in the index's `synonyms` setting; Typesense in a synonym set named
+  like the index's collection, attached to it and deleted with it (an application's own sets
+  attached to the collection are kept). The mock applies them too.
+- They belong to the index: a rebuilt index needs them set before `ReplaceIndex` (guide 9).
 
 ## Native access
 
-What the contract leaves out (synonyms, typo settings, ranking rules, highlight, geo...) goes
-through the adapter:
+What the contract leaves out (cropping, scores, geo, `EXISTS`...) goes through the adapter:
 
 - `(Engine as IMeilisearchEngine).Send(Method, Path, Body)` and `WaitForTask`;
   `(Engine as ITypesenseEngine).Send(...)`: any endpoint, with the key and the error mapping;
+- typed settings, each returning once applied: Meilisearch `SetTypoTolerance(Index,
+  TMeilisearchTypoTolerance)` (`Standard` is the engine's own), `SetRankingRules(Index, [...])`,
+  `SetStopWords(Index, [...])`; Typesense `SetCuration(Index, [TTypesenseCuration.Create(Id,
+  Query, PinnedIds, HiddenIds)])` (a curation set named like the collection). Typesense's typo
+  settings are search parameters: `Raw('num_typos', '0')`;
 - `.Raw('name', JsonValueText)` adds an engine parameter to a query, and `R.RawJson` is the
   engine's answer as received. The mock refuses `Raw` (`ESearchNotSupported`), so a test
   notices code that depends on one engine.

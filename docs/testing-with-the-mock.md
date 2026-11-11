@@ -34,6 +34,10 @@ begin
   the wrong kind, an index never ensured.
 - `Raw` and `tmEngine` raise `ESearchNotSupported`: code that depends on one engine is tested on
   that engine.
+- Synonyms apply (a query word, or a run of words, equal to a group's key also matches through
+  its synonyms); highlight marks the query's words and their synonyms' whole, the last word also
+  as a prefix, on Text fields only; `ReplaceIndex` first applies what `DeferWrites` held;
+  `ListIds` returns the ids in the order they were first added.
 - Thread-safe: one lock for the whole engine.
 
 The outbox bridge's own tests (`tests/Unit/PascalSearch.OutboxTests.pas`) show the pattern for

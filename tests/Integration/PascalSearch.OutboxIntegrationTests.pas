@@ -11,6 +11,8 @@
     update and a delete later follow;
   - a failed try (an index not there yet) leaves the delivery pending, and
     the local sink's retry, after the delay, delivers it;
+  - a caller's bug (an id the library refuses) is dead at the first try
+    (EOutboxGiveUp, pascal-db-faa 0.21.0; design S30);
   - a reindex from the database, page by page through Sync.
 
   The outbox's tables and statements are pascal-db-faa's reference SQL, read
@@ -65,6 +67,8 @@ type
     procedure SaveProduct(AId: Integer; const ATitle: string; ANow: Int64; ACommit: Boolean = True);
     procedure DeleteProduct(AId: Integer; ANow: Int64);
     procedure InsertWithoutEvent(AId: Integer; const ATitle: string);
+    procedure EnqueuePayload(const APayload: string; ANow: Int64);
+    function DeliveriesWithStatus(const AStatus: string): Integer;
     function AllProductIds: TArray<string>;
     function Load(const AIds: TArray<string>): TSearchDocuments;
     procedure OnOutboxError(const AEvent: TOutboxEvent; const AHandler, AMessage: string);
@@ -74,6 +78,7 @@ type
     [TearDown] procedure TearDown;
     [Test] procedure CommittedChanges_ReachTheIndex;
     [Test] procedure FailedTry_RetriedByTheLocalSink;
+    [Test] procedure BadId_DeadAtTheFirstTry;
     [Test] procedure Reindex_FromTheDatabase;
   end;
 
@@ -264,6 +269,36 @@ begin
   end;
 end;
 
+// An event with any payload, alone in its transaction.
+procedure TOutboxIntegrationTests.EnqueuePayload(const APayload: string; ANow: Int64);
+var
+  LQuery: IQuery;
+  LScope: IScopeTransaction;
+begin
+  LScope := FFactory.GetPool.AcquireQuery(LQuery);
+  LScope.StartTransaction;
+  try
+    TOutbox.Enqueue(FFactory, LQuery, TENANT, KIND_SAVED, APayload, ANow);
+    LScope.Commit;
+  except
+    LScope.Rollback;
+    raise;
+  end;
+end;
+
+function TOutboxIntegrationTests.DeliveriesWithStatus(const AStatus: string): Integer;
+var
+  LQuery: IQuery;
+  LScope: IScopeTransaction;
+  LResult: IQueryResult;
+begin
+  LScope := FFactory.GetPool.AcquireQuery(LQuery);
+  LQuery.Sql := 'SELECT COUNT(*) AS N FROM OUTBOX_DELIVERIES WHERE STATUS = :STATUS';
+  LQuery.Params.Strings['STATUS'] := AStatus;
+  LResult := LQuery.Open;
+  Result := LResult.Integers['N'];
+end;
+
 function TOutboxIntegrationTests.AllProductIds: TArray<string>;
 var
   LQuery: IQuery;
@@ -423,6 +458,29 @@ begin
     TAssert.AssertEquals(1, LSink.RunOnce(1005));
     TAssert.AssertEquals(1, FErrors);
     TAssert.AssertTrue(FEngine.Index(MISSING_INDEX_NAME).Get('1') <> nil);
+  finally
+    LRelay.Free;
+  end;
+end;
+
+procedure TOutboxIntegrationTests.BadId_DeadAtTheFirstTry;
+var
+  LSink: IOutboxLocalSink;
+  LRelay: TOutboxRelay;
+begin
+  LSink := TOutboxLocalSink.Create(FFactory, PdbOutboxNewOwner('sink'), TOutboxOptions.Default);
+  LSink.SetOnError(OnOutboxError);
+  LSink.AddHandler(TSearchOutboxHandler.Create('search.products', FIndex, [KIND_SAVED], Load));
+  LRelay := TOutboxRelay.Create(FFactory, LSink, PdbOutboxNewOwner('relay'), TOutboxOptions.Default);
+  try
+    EnqueuePayload('{"ids":["a.b"]}', 990);
+    TAssert.AssertEquals(1, LRelay.RunOnce(1000));
+    TAssert.AssertEquals(0, LSink.RunOnce(1000));
+    TAssert.AssertEquals(1, FErrors);
+    TAssert.AssertTrue(FLastError, Pos('EOutboxGiveUp: ESearchArgumentError: ', FLastError) = 1);
+    TAssert.AssertEquals('dead without the 10 tries', 1, DeliveriesWithStatus('dead'));
+    TAssert.AssertEquals('never tried again', 0, LSink.RunOnce(100000));
+    TAssert.AssertEquals(1, FErrors);
   finally
     LRelay.Free;
   end;

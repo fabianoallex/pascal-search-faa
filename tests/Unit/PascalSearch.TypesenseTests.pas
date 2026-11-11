@@ -6,7 +6,9 @@
    with its encoded query, key, body) and how it reads each answer, the
    schema kept in the collection's metadata, the checks the adapter makes
    itself (filter, sort and facet fields, MaxHits), and the filter text with
-   the probe's hostile values (docs/design.md, S13 and S24).
+   the probe's hostile values (docs/design.md, S13 and S24). 0.2.0: an index
+   is an alias to a collection named with TClock (fixed here), ReplaceIndex,
+   ListIds, synonym and curation sets, highlight (section 12).
 
    What Typesense itself does with these requests is the integration
    suite's job (tests/Integration).
@@ -21,10 +23,12 @@ uses
   DUnitX.TestFramework,
   PascalSearch.DUnitXCompat,
   SysUtils,
+  PascalCommon.SystemContext,
   PascalCommon.Http,
   PascalCommon.Http.Fake,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
+  PascalSearch.Values,
   PascalSearch.Schema,
   PascalSearch.Documents,
   PascalSearch.Filters,
@@ -32,6 +36,20 @@ uses
   PascalSearch.Typesense;
 
 type
+  TFixedClock = class(TInterfacedObject, IClock)
+  public
+    function Now: TDateTime;
+    function Date: TDateTime;
+  end;
+
+  TFakeTicker = class(TInterfacedObject, ITicker)
+  private
+    FNow: UInt64;
+  public
+    function NowMs: UInt64;
+    procedure Advance(AMs: Integer);
+  end;
+
   [TestFixture]
   TTypesenseTests = class
   private
@@ -58,7 +76,7 @@ type
     [Test] procedure EnsureIndex_Same_MetadataOnly;
     [Test] procedure EnsureIndex_FlagsChanged_DropAndAdd;
     [Test] procedure EnsureIndex_KindChanged_SchemaError;
-    [Test] procedure EnsureIndex_CreatedMeanwhile;
+    [Test] procedure EnsureIndex_NameTaken_Suffix;
 
     [Test] procedure Upsert_ImportLines_SomeRefused;
     [Test] procedure Upsert_AllRefused_WholeBatch;
@@ -79,8 +97,18 @@ type
 
     [Test] procedure Get_FoundMissingAndNoCollection;
     [Test] procedure GetMany_OrderAsked;
-    [Test] procedure DropIndex_Missing_NoError;
+    [Test] procedure DropIndex_AliasCollectionAndSets;
+    [Test] procedure DropIndex_OldCollectionOrMissing;
     [Test] procedure Send_NativeAccess;
+
+    [Test] procedure ReplaceIndex_MovesTheAlias;
+    [Test] procedure ReplaceIndex_OldCollection_DroppedFirst;
+    [Test] procedure ReplaceIndex_SourceWithoutAlias;
+    [Test] procedure ListIds_Export;
+    [Test] procedure SetSynonyms_PutsSetAndAttaches;
+    [Test] procedure SetCuration_PutsSet;
+    [Test] procedure Search_Highlight;
+    [Test] procedure Schema_CacheExpires;
   end;
 
 implementation
@@ -104,6 +132,35 @@ const
     '{"name":"price","kind":"number","flags":["filter","sort"]},' +
     '{"name":"note","kind":"stored","flags":[]}]}}';
 
+function CollectionName: string;
+begin
+  Result := 'products@' + IntToStr(SearchInstantToMs(EncodeDate(2026, 11, 11)));
+end;
+
+{ TFakeTicker }
+
+function TFakeTicker.NowMs: UInt64;
+begin
+  Result := FNow;
+end;
+
+procedure TFakeTicker.Advance(AMs: Integer);
+begin
+  Inc(FNow, AMs);
+end;
+
+{ TFixedClock }
+
+function TFixedClock.Now: TDateTime;
+begin
+  Result := EncodeDate(2026, 11, 11);
+end;
+
+function TFixedClock.Date: TDateTime;
+begin
+  Result := EncodeDate(2026, 11, 11);
+end;
+
 function Schema: ISearchSchema;
 begin
   Result := TSearchSchema.New('products')
@@ -121,10 +178,13 @@ begin
   FFake := TPcFakeHttpTransport.Create;
   FTransport := FFake;
   FEngine := TTypesenseEngine.New(TTypesenseConfig.Create(BASE, 'secret'), FTransport);
+  TClock.SetClock(TFixedClock.Create);
 end;
 
 procedure TTypesenseTests.TearDown;
 begin
+  TClock.Reset;
+  TTicker.Reset;
   FEngine := nil;
   FTransport := nil;
   FFake := nil;
@@ -260,17 +320,21 @@ var
 begin
   NoCollection;
   FFake.Answer(201, COLLECTION_JSON);
+  Ok('{}');
   LIndex := FEngine.EnsureIndex(Schema);
   TAssert.AssertEquals('products', LIndex.Name);
-  TAssert.AssertEquals(2, FFake.RequestCount);
+  TAssert.AssertEquals(3, FFake.RequestCount);
   TAssert.AssertEquals('GET /collections/products', Req(0));
   TAssert.AssertEquals('secret', FFake.Request(0).Header('X-TYPESENSE-API-KEY'));
   TAssert.AssertEquals('POST /collections', Req(1));
-  TAssert.AssertEquals(TypesenseCollectionJson(Schema), FFake.Request(1).Body);
+  TAssert.AssertEquals(TypesenseCollectionJson(Schema, CollectionName), FFake.Request(1).Body);
+  TAssert.AssertTrue(Pos('{"name":"products@', FFake.Request(1).Body) = 1);
+  TAssert.AssertEquals('PUT /aliases/products', Req(2));
+  TAssert.AssertEquals('{"collection_name":"' + CollectionName + '"}', FFake.Request(2).Body);
   // The schema is known now: a search asks for nothing but the search.
   Ok('{"found":0,"hits":[]}');
   LIndex.Search('').Execute;
-  TAssert.AssertEquals(3, FFake.RequestCount);
+  TAssert.AssertEquals(4, FFake.RequestCount);
 end;
 
 procedure TTypesenseTests.EnsureIndex_Same_MetadataOnly;
@@ -315,15 +379,17 @@ begin
   TAssert.AssertEquals('nothing changed', 1, FFake.RequestCount);
 end;
 
-procedure TTypesenseTests.EnsureIndex_CreatedMeanwhile;
+procedure TTypesenseTests.EnsureIndex_NameTaken_Suffix;
 begin
   NoCollection;
-  FFake.Answer(409, '{"message":"A collection with name `products` already exists."}');
-  Collection;
+  FFake.Answer(409, '{"message":"A collection with name `x` already exists."}');
+  FFake.Answer(201, '{}');
   Ok('{}');
   FEngine.EnsureIndex(Schema);
   TAssert.AssertEquals(4, FFake.RequestCount);
-  TAssert.AssertEquals('PATCH /collections/products', Req(3));
+  TAssert.AssertTrue(Pos('{"name":"' + CollectionName + '_2"', FFake.Request(2).Body) = 1);
+  TAssert.AssertEquals('PUT /aliases/products', Req(3));
+  TAssert.AssertEquals('{"collection_name":"' + CollectionName + '_2"}', FFake.Request(3).Body);
 end;
 
 procedure TTypesenseTests.Upsert_ImportLines_SomeRefused;
@@ -523,11 +589,12 @@ var
 begin
   NoCollection;
   FFake.Answer(201, '{}');
+  Ok('{}');
   FEngine.EnsureIndex(TSearchSchema.New('codes').Keyword('code', [sfFilter, sfFacet]));
   R := FEngine.Index('codes').Search('abc').Facets(['code']).Execute;
   TAssert.AssertEquals(Int64(0), R.Total);
   TAssert.AssertTrue(R.FindFacet('code', LFacet));
-  TAssert.AssertEquals('no request: nothing to search the words in', 2, FFake.RequestCount);
+  TAssert.AssertEquals('no request: nothing to search the words in', 3, FFake.RequestCount);
 end;
 
 procedure TTypesenseTests.Schema_ReadOnce_FromCollectionWithoutMetadata;
@@ -611,25 +678,237 @@ begin
   TAssert.AssertEquals('c', H.Hit(2).Document.Find('title').AsString);
 end;
 
-procedure TTypesenseTests.DropIndex_Missing_NoError;
+procedure TTypesenseTests.DropIndex_AliasCollectionAndSets;
 begin
+  Ok('{"collection_name":"products@1","name":"products"}');
   Ok(COLLECTION_JSON);
+  Ok('{}');
+  FFake.Answer(404, '{"message":"Not Found"}');
+  FFake.Answer(404, '{"message":"Not Found"}');
   FEngine.DropIndex('products');
-  TAssert.AssertEquals('DELETE /collections/products', Req(0));
+  TAssert.AssertEquals(5, FFake.RequestCount);
+  TAssert.AssertEquals('GET /aliases/products', Req(0));
+  TAssert.AssertEquals('DELETE /collections/products%401', Req(1));
+  TAssert.AssertEquals('DELETE /aliases/products', Req(2));
+  TAssert.AssertEquals('the sets after the collection', 'DELETE /synonym_sets/products%401', Req(3));
+  TAssert.AssertEquals('DELETE /curation_sets/products%401', Req(4));
+end;
+
+procedure TTypesenseTests.DropIndex_OldCollectionOrMissing;
+begin
   NoCollection;
+  Ok(COLLECTION_JSON);
+  Ok('{}');
+  Ok('{}');
   FEngine.DropIndex('products');
-  TAssert.AssertEquals(2, FFake.RequestCount);
+  TAssert.AssertEquals('a 0.1.0 collection named like the index', 'DELETE /collections/products', Req(1));
+  TAssert.AssertEquals('DELETE /synonym_sets/products', Req(2));
+  NoCollection;
+  NoCollection;
+  FFake.Answer(404, '{"message":"Not Found"}');
+  FFake.Answer(404, '{"message":"Not Found"}');
+  FEngine.DropIndex('products');
+  TAssert.AssertEquals('missing: no error', 8, FFake.RequestCount);
+  FFake.Answer(503, '{"message":"Not Ready or Lagging"}');
+  try
+    FEngine.DropIndex('products');
+    TAssert.Fail('A 503 must raise');
+  except
+    on ESearchUnavailable do
+      TAssert.AssertTrue(True);
+  end;
 end;
 
 procedure TTypesenseTests.Send_NativeAccess;
 begin
-  Ok('{"synonyms":[]}');
-  TAssert.AssertEquals('{"synonyms":[]}', FEngine.Send('GET', '/collections/products/synonyms'));
+  Ok('[]');
+  TAssert.AssertEquals('[]', FEngine.Send('GET', '/synonym_sets'));
   TAssert.AssertEquals('secret', FFake.Request(0).Header('X-TYPESENSE-API-KEY'));
   TAssert.AssertEquals('', FFake.Request(0).Header('Content-Type'));
   Ok('{}');
-  FEngine.Send('PUT', '/collections/products/synonyms/s1', '{"synonyms":["a","b"]}');
+  FEngine.Send('PUT', '/synonym_sets/s1', '{"items":[]}');
   TAssert.AssertEquals('application/json', FFake.Request(1).Header('Content-Type'));
+end;
+
+procedure TTypesenseTests.ReplaceIndex_MovesTheAlias;
+begin
+  Ok('{"collection_name":"products_new@2","name":"products_new"}');
+  Ok('{"name":"products_new@2","fields":[]}');
+  Ok('{"collection_name":"products@1","name":"products"}');
+  Ok('{}');
+  Ok('{}');
+  Ok('{}');
+  FFake.Answer(404, '{"message":"Not Found"}');
+  FFake.Answer(404, '{"message":"Not Found"}');
+  FEngine.ReplaceIndex('products', 'products_new');
+  TAssert.AssertEquals(8, FFake.RequestCount);
+  TAssert.AssertEquals('GET /aliases/products_new', Req(0));
+  TAssert.AssertEquals('GET /collections/products_new', Req(1));
+  TAssert.AssertEquals('GET /aliases/products', Req(2));
+  TAssert.AssertEquals('PUT /aliases/products', Req(3));
+  TAssert.AssertEquals('{"collection_name":"products_new@2"}', FFake.Request(3).Body);
+  TAssert.AssertEquals('DELETE /aliases/products_new', Req(4));
+  TAssert.AssertEquals('DELETE /collections/products%401', Req(5));
+  TAssert.AssertEquals('DELETE /synonym_sets/products%401', Req(6));
+  TAssert.AssertEquals('DELETE /curation_sets/products%401', Req(7));
+end;
+
+procedure TTypesenseTests.ReplaceIndex_OldCollection_DroppedFirst;
+begin
+  Ok('{"collection_name":"products_new@2","name":"products_new"}');
+  Ok('{"name":"products_new@2","fields":[]}');
+  NoCollection;
+  Ok(COLLECTION_JSON);
+  Ok('{}');
+  Ok('{}');
+  Ok('{}');
+  Ok('{}');
+  Ok('{}');
+  FEngine.ReplaceIndex('products', 'products_new');
+  TAssert.AssertEquals('GET /aliases/products', Req(2));
+  TAssert.AssertEquals('GET /collections/products', Req(3));
+  TAssert.AssertEquals('the name freed for the alias', 'DELETE /collections/products', Req(4));
+  TAssert.AssertEquals('PUT /aliases/products', Req(5));
+  TAssert.AssertEquals('DELETE /aliases/products_new', Req(6));
+  TAssert.AssertEquals('DELETE /synonym_sets/products', Req(7));
+  TAssert.AssertEquals('DELETE /curation_sets/products', Req(8));
+  TAssert.AssertEquals(9, FFake.RequestCount);
+end;
+
+procedure TTypesenseTests.ReplaceIndex_SourceWithoutAlias;
+begin
+  NoCollection;
+  Ok(COLLECTION_JSON);
+  try
+    FEngine.ReplaceIndex('products', 'products_new');
+    TAssert.Fail('A 0.1.0 source must raise');
+  except
+    on E: ESearchNotSupported do
+      TAssert.AssertTrue(E.Message, Pos('0.2.0', E.Message) > 0);
+  end;
+  NoCollection;
+  NoCollection;
+  try
+    FEngine.ReplaceIndex('products', 'products_new');
+    TAssert.Fail('A missing source must raise');
+  except
+    on ESearchIndexNotFound do
+      TAssert.AssertEquals(4, FFake.RequestCount);
+  end;
+end;
+
+procedure TTypesenseTests.ListIds_Export;
+var
+  LIds: TArray<string>;
+begin
+  Collection;
+  Ok('{"id":"1"}'#10'{"id":"7"}'#10);
+  LIds := FEngine.Index('products').ListIds;
+  TAssert.AssertEquals('GET /collections/products/documents/export?include_fields=id', Req(1));
+  TAssert.AssertEquals(2, Length(LIds));
+  TAssert.AssertEquals('7', LIds[1]);
+  Ok('');
+  LIds := FEngine.Index('products').ListIds(F.Eq('category', 'bebida'));
+  TAssert.AssertEquals(0, Length(LIds));
+  TAssert.AssertEquals('GET /collections/products/documents/export?include_fields=id' +
+    '&filter_by=category%3A%3D%60bebida%60', Req(2));
+  try
+    FEngine.Index('products').ListIds(F.Eq('title', 'x'));
+    TAssert.Fail('A filter on a field not declared filterable must raise');
+  except
+    on ESearchRequestError do
+      TAssert.AssertEquals('nothing sent', 3, FFake.RequestCount);
+  end;
+end;
+
+procedure TTypesenseTests.SetSynonyms_PutsSetAndAttaches;
+begin
+  TAssert.AssertEquals('{"items":[{"id":"g0","synonyms":["tv","televisão"]},' +
+    '{"id":"g1","root":"geladeira","synonyms":["refrigerador"]}]}',
+    TypesenseSynonymSetJson([TSearchSynonym.Equivalent(['tv', 'televisão']),
+      TSearchSynonym.OneWay('geladeira', ['refrigerador'])]));
+  Ok('{"name":"products@1","synonym_sets":["mine"],"fields":[]}');
+  Ok('{}');
+  Ok('{}');
+  FEngine.Index('products').SetSynonyms([TSearchSynonym.Equivalent(['tv', 'televisão'])]);
+  TAssert.AssertEquals('GET /collections/products', Req(0));
+  TAssert.AssertEquals('PUT /synonym_sets/products%401', Req(1));
+  TAssert.AssertEquals('{"items":[{"id":"g0","synonyms":["tv","televisão"]}]}', FFake.Request(1).Body);
+  TAssert.AssertEquals('PATCH /collections/products', Req(2));
+  TAssert.AssertEquals('the application''s set kept', '{"synonym_sets":["mine","products@1"]}',
+    FFake.Request(2).Body);
+  Ok('{"name":"products@1","synonym_sets":["mine","products@1"],"fields":[]}');
+  Ok('{}');
+  FEngine.Index('products').SetSynonyms([]);
+  TAssert.AssertEquals('{"items":[]}', FFake.Request(4).Body);
+  TAssert.AssertEquals('attached already: no PATCH', 5, FFake.RequestCount);
+  NoCollection;
+  try
+    FEngine.Index('products').SetSynonyms([]);
+    TAssert.Fail('A missing collection must raise');
+  except
+    on ESearchIndexNotFound do
+      TAssert.AssertEquals(6, FFake.RequestCount);
+  end;
+end;
+
+procedure TTypesenseTests.SetCuration_PutsSet;
+begin
+  Ok('{"name":"products@1","fields":[]}');
+  Ok('{}');
+  Ok('{}');
+  FEngine.SetCuration('products', [TTypesenseCuration.Create('pin', 'geladeira', ['4', '9'], ['3'])]);
+  TAssert.AssertEquals('PUT /curation_sets/products%401', Req(1));
+  TAssert.AssertEquals('{"items":[{"id":"pin","rule":{"query":"geladeira","match":"exact"},' +
+    '"includes":[{"id":"4","position":1},{"id":"9","position":2}],"excludes":[{"id":"3"}]}]}',
+    FFake.Request(1).Body);
+  TAssert.AssertEquals('{"curation_sets":["products@1"]}', FFake.Request(2).Body);
+  try
+    FEngine.SetCuration('products', [TTypesenseCuration.Create('', 'x', [], [])]);
+    TAssert.Fail('An item without an id must raise');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertEquals(3, FFake.RequestCount);
+  end;
+end;
+
+procedure TTypesenseTests.Search_Highlight;
+var
+  R: ISearchResult;
+  H: TSearchHighlight;
+begin
+  Collection;
+  Ok('{"found":1,"hits":[{"document":{"id":"1"},"highlight":{"title":{"matched_tokens":["Café"],' +
+    '"snippet":"x","value":"\u0001Café\u0002 com leite"}}}]}');
+  R := FEngine.Index('products').Search('café').Fields(['id']).Highlight(['title']).Execute;
+  TAssert.AssertEquals('GET /collections/products/documents/search?q=caf%C3%A9&query_by=title' +
+    '&drop_tokens_threshold=0&page=1&per_page=20&include_fields=id&highlight_fields=title' +
+    '&highlight_full_fields=title&highlight_start_tag=%01&highlight_end_tag=%02&enable_highlight_v1=false',
+    Req(1));
+  TAssert.AssertTrue(R.Hit(0).FindHighlight('title', H));
+  TAssert.AssertEquals('Café com leite', H.Text);
+  TAssert.AssertEquals('<mark>Café</mark> com leite', H.ToHtml);
+  ExpectRequestError(FEngine.Index('products').Search('x').Highlight(['category']), 'category');
+  TAssert.AssertEquals('nothing sent', 2, FFake.RequestCount);
+end;
+
+procedure TTypesenseTests.Schema_CacheExpires;
+var
+  LTime: TFakeTicker;
+begin
+  LTime := TFakeTicker.Create;
+  TTicker.SetTicker(LTime);
+  Collection;
+  Ok('{"found":0,"hits":[]}');
+  FEngine.Index('products').Search('').Execute;
+  Ok('{"found":0,"hits":[]}');
+  FEngine.Index('products').Search('').Execute;
+  TAssert.AssertEquals('read once', 3, FFake.RequestCount);
+  LTime.Advance(TYPESENSE_DEFAULT_CACHE_MS);
+  Collection;
+  Ok('{"found":0,"hits":[]}');
+  FEngine.Index('products').Search('').Execute;
+  TAssert.AssertEquals('read again', 'GET /collections/products', Req(3));
 end;
 
 initialization

@@ -232,3 +232,95 @@ Typesense 30.2, measured with curl against a throwaway container and by `tests/I
     code 400 "Field `price` must be a float."; the other lines are kept (finding 5).
 56. The contract suite (39 tests) passed on Typesense without a change, and on Meilisearch:
     the common ground of section D-H holds through the adapters.
+
+## M. Probed for 0.2.0 (2026-11-11)
+
+Meilisearch v1.56.2 and Typesense 30.2 in throwaway containers, requests from a Python script
+(`.ci/probe-v02/`, git-ignored; `out-*.txt` is the raw output). Same kind of documents as section
+A (accents, HTML in a value, a document without some fields), plus 1500 generated ones.
+
+### Replacing an index
+
+57. **Meilisearch `POST /swap-indexes`** (`[{"indexes": ["a", "b"]}]`) is one task that swaps the
+    whole indexes: documents and settings (`filterableAttributes`, `pagination.maxTotalHits`).
+    A missing index fails the task (`index_not_found`) and nothing changes.
+58. **Meilisearch renames**: `"rename": true` in a swap renames `a` to `b` when `b` doesn't exist
+    (`index_already_exists` in the task when it does); `PATCH /indexes/{uid}` with `{"uid": ...}`
+    renames too. Both are tasks.
+59. **Typesense aliases**: `PUT /aliases/{name}` `{"collection_name": ...}`. Search, import, get,
+    delete by filter, `PATCH /collections/{alias}` (metadata) and `GET /collections/{alias}` all
+    resolve an alias (the GET answers with the collection's own name and metadata). Repointing is
+    one PUT. An alias to a missing collection is accepted, and dropping a collection leaves its
+    alias dangling: a search through it is 404 "Collection not found".
+60. **Typesense names**: an alias named like an existing collection is refused (500 "conflicts
+    with an existing collection name"), but a collection can be created with an alias's name, and
+    then the collection wins (`DELETE /collections/p` dropped the collection `p`, not the alias's
+    target). Deleting a missing alias: 404 "Collection not found". **No rename**: `PATCH` accepts
+    only `fields`, `metadata` and `synonym_sets` (400 otherwise). Alias names take any character
+    (`a b`).
+
+### Listing every id
+
+61. **Neither listing is capped like search.** Meilisearch `GET /indexes/{uid}/documents` and
+    `POST .../documents/fetch` page with `offset`/`limit` past `maxTotalHits` (offset 1490 of
+    1500 with `maxTotalHits` 1000; `limit` 100000 returned all 1500), take `fields`, and `fetch`
+    takes a `filter` (filterable attributes only; `sort` needs sortable ones). The order is the
+    engine's: insertion order, a rewritten document keeps its place, a new one goes last; an
+    offset past the end is empty. Typesense `GET /collections/{name}/documents/export` answers
+    every document as JSON lines, honors `include_fields` and `filter_by`, has no `limit` (ignored),
+    same order (a new document last); a missing collection is 404 "Collection not found".
+
+### Highlight
+
+62. **Meilisearch**: `attributesToHighlight` (names or `*`), `highlightPreTag`/`highlightPostTag`
+    (default `<em>`); the hit's `_formatted` holds every retrieved attribute, plus the highlighted
+    ones even when not retrieved, with the whole value. Numbers come back as strings there; each
+    element of an array is highlighted. Any attribute is highlighted, also one that isn't
+    searchable (`cat`, when the word matched another field). An unknown attribute: no
+    `_formatted` at all. Empty text: values without tags.
+63. **Typesense**: `highlight` per field: `snippet` (the whole value under `snippet_threshold`, 30
+    tokens; above it a window of `highlight_affix_num_tokens`, 4, each side), `value` (the whole
+    value) for the fields in `highlight_full_fields`, `matched_tokens`. An array gives one entry
+    per element. Tags `<mark>` by default, `highlight_start_tag`/`highlight_end_tag`. Without
+    `highlight_fields` only the `query_by` fields that are also returned (`include_fields`) are
+    highlighted; `highlight_fields` names any string field, returned or not. The old
+    `highlights` array comes too unless `enable_highlight_v1=false`. A field without a match is
+    left out of `highlight`.
+64. **Both**: a prefix marks only the matched part (`<em>Caf</em>é`), a typo or a folded accent
+    the whole word (`queiju` -> `<mark>queijo</mark>`, `agua` -> `<em>Água</em>`); **neither
+    escapes HTML**: `<script>alert(1)</script>` and `<b>` come back as stored, next to the tags.
+65. Cropping differs: Meilisearch `attributesToCrop`/`cropLength` in words with a `cropMarker`
+    (`…`); Typesense a window of tokens around each match, without a marker, only above the
+    threshold. No common ground.
+
+### Synonyms, typos, ranking, curation
+
+66. **Meilisearch synonyms**: the setting `synonyms` `{word: [words]}`, one way per key (each
+    word a key gives a group); keys and values can be several words; case and accents folded
+    (`televisao`, `TV`, a key `Geladeira`). `PUT` replaces them all, `{}` clears; a task. A value
+    that isn't an array is 400 at the call.
+67. **Typesense 30.2 synonyms are global sets**: the per-collection `/collections/{name}/synonyms`
+    is gone (404). `PUT /synonym_sets/{name}` `{"items": [{"id", "synonyms", "root"?}]}`: without
+    `root` the words are all equivalent, with it `root` -> `synonyms` one way; an item needs an
+    `id` (400). A collection uses a set through its `synonym_sets` (at creation or by `PATCH`), or
+    a search through `synonym_sets=`. Case and accents folded. `PUT` replaces the items. Set names
+    take any character; sets survive the collection's drop; attaching a missing set is 404.
+68. **Deleting a Typesense synonym set still attached breaks every search on the collection**:
+    404 "Synonym index not found" until the set is detached or created again. Deleting a curation
+    set in use is harmless.
+69. **The rest is per engine.** Typesense 30.2 curation is global sets too (`/curation_sets/{name}`,
+    items with `rule` `{query, match}`, `includes` with positions, `excludes`; attached by
+    `curation_sets`; the per-collection `overrides` endpoint is gone), and typo settings are search
+    parameters (`num_typos`...), not collection settings. Meilisearch `typoTolerance`
+    (`enabled`, `minWordSizeForTypos`, `disableOnWords`, `disableOnAttributes`), `rankingRules`
+    and `stopWords` are settings (tasks; a bad ranking rule is 400 at the call; `GET` shows the
+    1.56 names `attributeRank` and `wordPosition`).
+70. **A Typesense collection named `prod@1794403251000`** (an `@` and digits; `x y` too) works
+    behind an alias `prod`: import, search, export, `PATCH` of `fields`, `metadata` and
+    `synonym_sets`, all through the alias, with the `@` percent-encoded where the collection is
+    named in a path. `GET /collections/{alias}` answers with the collection's own `name`, and
+    `GET /aliases/{name}` with `collection_name` (404 "Collection not found" for no alias). A
+    synonym set can carry the collection's name; deleting it after the collection is harmless.
+71. **Control characters as highlight tags**: `highlightPreTag` `"\u0001"` / `highlightPostTag`
+    `"\u0002"` (Meilisearch) and `highlight_start_tag=%01` / `highlight_end_tag=%02` (Typesense)
+    come back as given around each match (`\u0001Caf\u0002é com leite` on both).

@@ -15,7 +15,7 @@
     </CompilerOptions>
     <Description Value="A search-engine contract for Delphi and Lazarus/FPC (dual-compiler): a declared schema, documents with string ids, batched upsert and delete, typed filters, text search with sort, paging and facets, waiting until a write is searchable, and an in-memory mock. Engine adapters are separate packages (pascal_search_faa_meilisearch, pascal_search_faa_typesense)."/>
     <License Value="MIT"/>
-    <Version Minor="1"/>
+    <Version Minor="2"/>
     <Files>
       <Item>
         <Filename Value="..\src\pascalsearch.inc"/>

@@ -7,7 +7,9 @@
   is the fixture's list of rows, read by its loader method. DeferWrites
   proves the handler waits for its writes; FailNextWrite and Unavailable
   that every failure is raised to the outbox, and that the retry (Handle
-  again) fixes the index. The whole path with a real outbox and engine is
+  again) fixes the index. A caller's bug (ESearchArgumentError,
+  ESearchRequestError) comes out of Handle as EOutboxGiveUp (design S30),
+  out of Sync as itself. The whole path with a real outbox and engine is
   in the integration suite.
 
   DUnitX master, written in FPCUnit's assertion dialect (TAssert.*, through
@@ -24,6 +26,7 @@ uses
   PascalSearch.Errors,
   PascalSearch.Schema,
   PascalSearch.Documents,
+  PascalSearch.Filters,
   PascalSearch.Interfaces,
   PascalSearch.Mock,
   PascalSearch.Outbox;
@@ -68,12 +71,74 @@ type
     [Test] procedure Handle_EngineDown_RaisesAndRetryFixes;
     [Test] procedure Loader_DocumentNotAskedFor_ArgumentError;
     [Test] procedure Loader_SameDocumentTwice_ArgumentError;
+    [Test] procedure Handle_RequestError_GivesUp;
+    [Test] procedure Handle_IndexMissing_Retried;
+    [Test] procedure Sync_RaisesTheLibrarysErrors;
     [Test] procedure IdsReader_OtherPayload;
     [Test] procedure Sync_Reindex;
     [Test] procedure Payload_RoundTrip;
   end;
 
 implementation
+
+type
+  /// An index whose writes the engine refuses as a request error.
+  TRefusingIndex = class(TInterfacedObject, ISearchIndex)
+  public
+    function Name: string;
+    function Upsert(const ADocs: array of ISearchDocument): ISearchWrite;
+    function Delete(const AIds: array of string): ISearchWrite;
+    function DeleteWhere(const AFilter: ISearchFilter): ISearchWrite;
+    function Get(const AId: string): ISearchHit;
+    function GetMany(const AIds: array of string): ISearchHits;
+    function Search(const AText: string): ISearchQuery;
+    function ListIds(const AFilter: ISearchFilter = nil): TArray<string>;
+    procedure SetSynonyms(const AGroups: array of TSearchSynonym);
+  end;
+
+function TRefusingIndex.Name: string;
+begin
+  Result := 'refused';
+end;
+
+function TRefusingIndex.Upsert(const ADocs: array of ISearchDocument): ISearchWrite;
+begin
+  raise ESearchRequestError.Create('refused');
+end;
+
+function TRefusingIndex.Delete(const AIds: array of string): ISearchWrite;
+begin
+  raise ESearchRequestError.Create('refused');
+end;
+
+function TRefusingIndex.DeleteWhere(const AFilter: ISearchFilter): ISearchWrite;
+begin
+  raise ESearchRequestError.Create('refused');
+end;
+
+function TRefusingIndex.Get(const AId: string): ISearchHit;
+begin
+  Result := nil;
+end;
+
+function TRefusingIndex.GetMany(const AIds: array of string): ISearchHits;
+begin
+  Result := nil;
+end;
+
+function TRefusingIndex.Search(const AText: string): ISearchQuery;
+begin
+  Result := nil;
+end;
+
+function TRefusingIndex.ListIds(const AFilter: ISearchFilter): TArray<string>;
+begin
+  Result := nil;
+end;
+
+procedure TRefusingIndex.SetSynonyms(const AGroups: array of TSearchSynonym);
+begin
+end;
 
 const
   KIND_SAVED = 'product.saved';
@@ -355,10 +420,11 @@ begin
   for I := 0 to High(PAYLOADS) do
     try
       FHandler.Handle(Event(KIND_SAVED, PAYLOADS[I]));
-      TAssert.Fail('must raise ESearchArgumentError: ' + PAYLOADS[I]);
+      TAssert.Fail('must raise EOutboxGiveUp: ' + PAYLOADS[I]);
     except
-      on E: ESearchArgumentError do
-        Inc(LRaised);
+      on E: EOutboxGiveUp do
+        if Pos('ESearchArgumentError: ', E.Message) = 1 then
+          Inc(LRaised);
     end;
   TAssert.AssertEquals(Integer(Length(PAYLOADS)), LRaised);
   TAssert.AssertEquals('nothing loaded', 0, FLoads);
@@ -368,9 +434,9 @@ procedure TOutboxTests.Handle_BadId_ArgumentErrorBeforeLoading;
 begin
   try
     FHandler.Handle(Event(KIND_SAVED, '{"ids":["1","a.b"]}'));
-    TAssert.Fail('must raise ESearchArgumentError');
+    TAssert.Fail('must raise EOutboxGiveUp');
   except
-    on E: ESearchArgumentError do
+    on E: EOutboxGiveUp do
       TAssert.AssertTrue(E.Message, Pos('a.b', E.Message) > 0);
   end;
   TAssert.AssertEquals('nothing loaded', 0, FLoads);
@@ -438,9 +504,9 @@ begin
   FLoaderBug := 1;
   try
     FHandler.Handle(Event(KIND_SAVED, '{"ids":["1"]}'));
-    TAssert.Fail('must raise ESearchArgumentError');
+    TAssert.Fail('must raise EOutboxGiveUp');
   except
-    on E: ESearchArgumentError do
+    on E: EOutboxGiveUp do
       TAssert.AssertTrue(E.Message, Pos('"99"', E.Message) > 0);
   end;
   TAssert.AssertEquals('nothing written', 0, FEngine.DocumentCount('outbox_products'));
@@ -452,12 +518,52 @@ begin
   FLoaderBug := 2;
   try
     FHandler.Handle(Event(KIND_SAVED, '{"ids":["1"]}'));
-    TAssert.Fail('must raise ESearchArgumentError');
+    TAssert.Fail('must raise EOutboxGiveUp');
   except
-    on E: ESearchArgumentError do
+    on E: EOutboxGiveUp do
       TAssert.AssertTrue(E.Message, Pos('twice', E.Message) > 0);
   end;
   TAssert.AssertEquals('nothing written', 0, FEngine.DocumentCount('outbox_products'));
+end;
+
+procedure TOutboxTests.Handle_RequestError_GivesUp;
+var
+  LHandler: IOutboxHandler;
+begin
+  SetRow('1', 'Café');
+  LHandler := TSearchOutboxHandler.Create('search.refused', TRefusingIndex.Create,
+    [KIND_SAVED], Load);
+  try
+    LHandler.Handle(Event(KIND_SAVED, '{"ids":["1"]}'));
+    TAssert.Fail('must raise EOutboxGiveUp');
+  except
+    on E: EOutboxGiveUp do
+      TAssert.AssertEquals('ESearchRequestError: refused', E.Message);
+  end;
+end;
+
+procedure TOutboxTests.Handle_IndexMissing_Retried;
+begin
+  SetRow('1', 'Café');
+  FEngine.DropIndex('outbox_products');
+  try
+    FHandler.Handle(Event(KIND_SAVED, '{"ids":["1"]}'));
+    TAssert.Fail('must raise ESearchIndexNotFound');
+  except
+    on E: ESearchIndexNotFound do
+      TAssert.AssertTrue('not given up: an EnsureIndex makes the retry pass', Pos('outbox_products', E.Message) > 0);
+  end;
+end;
+
+procedure TOutboxTests.Sync_RaisesTheLibrarysErrors;
+begin
+  try
+    FBridge.Sync(['a.b']);
+    TAssert.Fail('must raise ESearchArgumentError');
+  except
+    on E: ESearchArgumentError do
+      TAssert.AssertTrue(E.Message, Pos('a.b', E.Message) > 0);
+  end;
 end;
 
 procedure TOutboxTests.IdsReader_OtherPayload;

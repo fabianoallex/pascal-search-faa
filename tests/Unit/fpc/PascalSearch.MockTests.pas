@@ -57,6 +57,11 @@ type
     procedure Filter_ValueOfWrongKind_RequestError;
     procedure Facet_FilterableNotFacet_RequestError;
     procedure DocumentCount_AndIndexes;
+    procedure Highlight_NotATextField_RequestError;
+    procedure Highlight_SynonymWordsMarked;
+    procedure ReplaceIndex_AppliesDeferredWritesFirst;
+    procedure Synonyms_LongestKeyFirst;
+    procedure Synonyms_Relaxed_CountsAGroupOnce;
   end;
 
 implementation
@@ -363,6 +368,82 @@ begin
   FIndex.Upsert([Doc('1', 'a', 'x'), Doc('2', 'b', 'x'), Doc('1', 'c', 'x')]).WaitFor;
   TAssert.AssertEquals('the same id twice is one document', 2, FEngine.DocumentCount('mock_products'));
   TAssert.AssertEquals('c', FIndex.Get('1').Document.Find('title').AsString);
+end;
+
+procedure TMockTests.Highlight_NotATextField_RequestError;
+begin
+  // Meilisearch would highlight any field; the mock (and Typesense) refuse.
+  try
+    FIndex.Search('x').Highlight(['category']).Execute;
+    TAssert.Fail('A highlight on a field that isn''t Text must raise');
+  except
+    on E: ESearchRequestError do
+      TAssert.AssertTrue(E.Message, Pos('"category"', E.Message) > 0);
+  end;
+  try
+    FIndex.Search('x').Highlight(['nope']).Execute;
+    TAssert.Fail('A highlight on an undeclared field must raise');
+  except
+    on ESearchRequestError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TMockTests.Highlight_SynonymWordsMarked;
+var
+  R: ISearchResult;
+  H: TSearchHighlight;
+begin
+  FIndex.Upsert([Doc('1', 'Televisão grande', 'tv de sala')]).WaitFor;
+  FIndex.SetSynonyms([TSearchSynonym.Equivalent(['tv', 'televisão'])]);
+  R := FIndex.Search('tv').Highlight(['title', 'body']).Execute;
+  TAssert.AssertEquals(1, R.Count);
+  TAssert.AssertTrue(R.Hit(0).FindHighlight('title', H));
+  TAssert.AssertEquals('Televisão', H.Parts[0].Text);
+  TAssert.AssertTrue(H.Parts[0].Matched);
+  TAssert.AssertTrue(R.Hit(0).FindHighlight('body', H));
+  TAssert.AssertEquals('<mark>tv</mark> de sala', H.ToHtml);
+end;
+
+procedure TMockTests.ReplaceIndex_AppliesDeferredWritesFirst;
+var
+  LStaging: ISearchIndex;
+begin
+  LStaging := FEngine.EnsureIndex(TSearchSchema.New('mock_new').Text('title'));
+  FEngine.DeferWrites := True;
+  LStaging.Upsert([Doc('n1', 'novo', '')]);
+  TAssert.AssertEquals(1, FEngine.PendingWrites);
+  FEngine.ReplaceIndex('mock_products', 'mock_new');
+  TAssert.AssertEquals(0, FEngine.PendingWrites);
+  TAssert.AssertEquals(1, FEngine.DocumentCount('mock_products'));
+  TAssert.AssertEquals(-1, FEngine.DocumentCount('mock_new'));
+  try
+    FIndex.Search('').Where(F.Eq('category', 'x')).Execute;
+    TAssert.Fail('The new schema has no "category"');
+  except
+    on E: ESearchRequestError do
+      TAssert.AssertTrue('the schema carries the target''s name: ' + E.Message,
+        Pos('"mock_products"', E.Message) > 0);
+  end;
+end;
+
+procedure TMockTests.Synonyms_LongestKeyFirst;
+begin
+  FIndex.Upsert([Doc('1', 'cafezinho', ''), Doc('2', 'chá', ''), Doc('3', 'café', 'preto')]).WaitFor;
+  FIndex.SetSynonyms([
+    TSearchSynonym.OneWay('café preto', ['cafezinho']),
+    TSearchSynonym.OneWay('café', ['chá'])]);
+  TAssert.AssertEquals('"café preto" is one key', '1,3', Ids(FIndex.Search('café preto').Execute));
+  TAssert.AssertEquals('cafezinho by the prefix, chá by the synonym', '1,2,3',
+    Ids(FIndex.Search('café').Execute));
+end;
+
+procedure TMockTests.Synonyms_Relaxed_CountsAGroupOnce;
+begin
+  FIndex.Upsert([Doc('1', 'cafezinho', ''), Doc('2', 'café preto forte', '')]).WaitFor;
+  FIndex.SetSynonyms([TSearchSynonym.Equivalent(['café preto', 'cafezinho'])]);
+  TAssert.AssertEquals('both match the group, then "forte"', '2,1',
+    Ids(FIndex.Search('café preto forte').Words(swRelaxed).Execute));
 end;
 
 initialization

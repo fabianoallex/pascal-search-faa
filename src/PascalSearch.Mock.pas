@@ -25,7 +25,14 @@
     its own (WaitFor raises ESearchWriteFailed listing it, the others are
     applied: Typesense's behavior; Meilisearch wouldn't check);
   - Raw parameters and tmEngine raise ESearchNotSupported;
-  - an index never ensured raises ESearchIndexNotFound on use.
+  - an index never ensured raises ESearchIndexNotFound on use;
+  - synonyms: a query word, or a run of query words, equal to a group's
+    key (folded) also matches through each of its synonyms (whole words);
+  - highlight: Text fields only (ESearchRequestError otherwise, where
+    Meilisearch wouldn't check); the words of the query and of its
+    synonyms are marked whole, the last word of the query also as a prefix
+    (the matched start only); no typos;
+  - ReplaceIndex first applies every write queued under DeferWrites.
 
   Test controls (IMockSearchEngine):
   - DeferWrites: a write is applied only when its WaitFor runs (with every
@@ -73,6 +80,7 @@ type
   TMockIndexData = class
   private
     FSchema: ISearchSchema;
+    FSynonyms: TArray<TSearchSynonym>;
     FIds: TArray<string>;
     FDocs: TArray<TJsonValue>;   // owned; each an object with its "id"
     function IndexOfId(const AId: string): Integer;
@@ -119,6 +127,7 @@ type
     procedure Submit(AOp: TMockWriteOp);
     procedure Apply(AOp: TMockWriteOp);
     procedure ApplyUpTo(AOp: TMockWriteOp);
+    procedure ApplyQueue;
     function OpPending(AOp: TMockWriteOp): Boolean;
     procedure RaiseFailures(AOp: TMockWriteOp);
   protected
@@ -129,6 +138,8 @@ type
     function DoGet(const AIndexName, AId: string): ISearchHit;
     function DoGetMany(const AIndexName: string; const AIds: array of string): ISearchHits;
     function DoSearch(const AIndexName: string; const ARequest: TSearchRequest): ISearchResult;
+    function DoListIds(const AIndexName: string; const AFilter: ISearchFilter): TArray<string>;
+    procedure DoSetSynonyms(const AIndexName: string; const AGroups: array of TSearchSynonym);
     procedure DoWaitFor(AOp: TMockWriteOp);
     function DoPending(AOp: TMockWriteOp): Boolean;
   public
@@ -140,6 +151,7 @@ type
     function Index(const AName: string): ISearchIndex;
     function IndexExists(const AName: string): Boolean;
     procedure DropIndex(const AName: string);
+    procedure ReplaceIndex(const ATarget, ASource: string);
     { IMockSearchEngine }
     function GetDeferWrites: Boolean;
     procedure SetDeferWrites(AValue: Boolean);
@@ -179,6 +191,8 @@ type
     function Get(const AId: string): ISearchHit;
     function GetMany(const AIds: array of string): ISearchHits;
     function Search(const AText: string): ISearchQuery;
+    function ListIds(const AFilter: ISearchFilter = nil): TArray<string>;
+    procedure SetSynonyms(const AGroups: array of TSearchSynonym);
     function ExecuteSearch(const ARequest: TSearchRequest): ISearchResult;
   end;
 
@@ -230,6 +244,248 @@ begin
       Result[High(Result)] := W;
       W := '';
     end;
+end;
+
+type
+  TMockWords = TArray<string>;
+
+  /// One step of a query: its own words, or (a synonym key) any of Alts.
+  TMockUnit = record
+    Words: TMockWords;
+    Alts: TArray<TMockWords>;
+  end;
+
+  TMockUnits = TArray<TMockUnit>;
+
+function SameWords(const A, B: TMockWords): Boolean;
+var
+  I: Integer;
+begin
+  Result := Length(A) = Length(B);
+  if Result then
+    for I := 0 to High(A) do
+      if A[I] <> B[I] then
+        Exit(False);
+end;
+
+// The query's words cut into units, the longest synonym key first.
+function BuildUnits(const AWords: TMockWords; const ASynonyms: TArray<TSearchSynonym>): TMockUnits;
+var
+  LKeys: TArray<TMockWords>;
+  LAlts: TArray<TArray<TMockWords>>;
+  I, J, K, N, LBest, LBestLen: Integer;
+  LMatch: Boolean;
+
+  procedure AddRule(const AKey: TMockWords; const AAlt: TMockWords);
+  var
+    X, Y: Integer;
+  begin
+    if (Length(AKey) = 0) or (Length(AAlt) = 0) then
+      Exit;
+    for X := 0 to High(LKeys) do
+      if SameWords(LKeys[X], AKey) then
+      begin
+        for Y := 0 to High(LAlts[X]) do
+          if SameWords(LAlts[X][Y], AAlt) then
+            Exit;
+        SetLength(LAlts[X], Length(LAlts[X]) + 1);
+        LAlts[X][High(LAlts[X])] := AAlt;
+        Exit;
+      end;
+    SetLength(LKeys, Length(LKeys) + 1);
+    SetLength(LAlts, Length(LAlts) + 1);
+    LKeys[High(LKeys)] := AKey;
+    SetLength(LAlts[High(LAlts)], 1);
+    LAlts[High(LAlts)][0] := AAlt;
+  end;
+
+begin
+  LKeys := nil;
+  LAlts := nil;
+  for I := 0 to High(ASynonyms) do
+    if ASynonyms[I].IsOneWay then
+    begin
+      for J := 0 to High(ASynonyms[I].Words) do
+        AddRule(Tokens(ASynonyms[I].Root), Tokens(ASynonyms[I].Words[J]));
+    end
+    else
+      for J := 0 to High(ASynonyms[I].Words) do
+        for K := 0 to High(ASynonyms[I].Words) do
+          if J <> K then
+            AddRule(Tokens(ASynonyms[I].Words[J]), Tokens(ASynonyms[I].Words[K]));
+  Result := nil;
+  I := 0;
+  N := Length(AWords);
+  while I < N do
+  begin
+    LBest := -1;
+    LBestLen := 0;
+    for K := 0 to High(LKeys) do
+      if (Length(LKeys[K]) > LBestLen) and (I + Length(LKeys[K]) <= N) then
+      begin
+        LMatch := True;
+        for J := 0 to High(LKeys[K]) do
+          if LKeys[K][J] <> AWords[I + J] then
+          begin
+            LMatch := False;
+            Break;
+          end;
+        if LMatch then
+        begin
+          LBest := K;
+          LBestLen := Length(LKeys[K]);
+        end;
+      end;
+    SetLength(Result, Length(Result) + 1);
+    if LBest >= 0 then
+    begin
+      Result[High(Result)].Words := Copy(AWords, I, LBestLen);
+      Result[High(Result)].Alts := LAlts[LBest];
+      Inc(I, LBestLen);
+    end
+    else
+    begin
+      Result[High(Result)].Words := Copy(AWords, I, 1);
+      Result[High(Result)].Alts := nil;
+      Inc(I);
+    end;
+  end;
+end;
+
+function HasToken(const ATokens: TMockWords; const AWord: string; APrefix: Boolean): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ATokens) do
+    if (ATokens[I] = AWord) or (APrefix and (Copy(ATokens[I], 1, Length(AWord)) = AWord)) then
+      Exit(True);
+  Result := False;
+end;
+
+// AUnit's own words (the last one also a prefix when ALast), or every word
+// of one of its synonyms.
+function UnitMatches(const AUnit: TMockUnit; ALast: Boolean; const ADocTokens: TMockWords): Boolean;
+var
+  I, J: Integer;
+begin
+  Result := True;
+  for I := 0 to High(AUnit.Words) do
+    if not HasToken(ADocTokens, AUnit.Words[I], ALast and (I = High(AUnit.Words))) then
+    begin
+      Result := False;
+      Break;
+    end;
+  if Result then
+    Exit;
+  for I := 0 to High(AUnit.Alts) do
+  begin
+    Result := True;
+    for J := 0 to High(AUnit.Alts[I]) do
+      if not HasToken(ADocTokens, AUnit.Alts[I][J], False) then
+      begin
+        Result := False;
+        Break;
+      end;
+    if Result then
+      Exit;
+  end;
+end;
+
+function IsRawWordChar(C: Char): Boolean;
+begin
+  Result := ((C >= 'a') and (C <= 'z')) or ((C >= 'A') and (C <= 'Z'))
+    or ((C >= '0') and (C <= '9')) or (Ord(C) > 127);
+end;
+
+// A code unit that continues a character (UTF-8 on FPC, a low surrogate on
+// Delphi): a prefix is never cut there.
+function IsContinuation(C: Char): Boolean;
+begin
+  {$IFDEF FPC}
+  Result := (Ord(C) and $C0) = $80;
+  {$ELSE}
+  Result := (Ord(C) >= $DC00) and (Ord(C) <= $DFFF);
+  {$ENDIF}
+end;
+
+// AValue cut at the words of AMarks (folded, whole) and at the start of a
+// word that begins with APrefix (folded; '' for none).
+function MockHighlight(const AField, AValue: string; const AMarks: TMockWords;
+  const APrefix: string): TSearchHighlight;
+var
+  I, LStart: Integer;
+  LHighlight: TSearchHighlight;
+
+  procedure Add(const AText: string; AMatched: Boolean);
+  var
+    N: Integer;
+  begin
+    if AText = '' then
+      Exit;
+    N := Length(LHighlight.Parts);
+    if (N > 0) and (LHighlight.Parts[N - 1].Matched = AMatched) then
+    begin
+      LHighlight.Parts[N - 1].Text := LHighlight.Parts[N - 1].Text + AText;
+      Exit;
+    end;
+    SetLength(LHighlight.Parts, N + 1);
+    LHighlight.Parts[N].Text := AText;
+    LHighlight.Parts[N].Matched := AMatched;
+  end;
+
+  procedure AddWord(const AText: string);
+  var
+    X, K: Integer;
+    LFolded: string;
+  begin
+    LFolded := PcFoldForSearch(AText);
+    for X := 0 to High(AMarks) do
+      if LFolded = AMarks[X] then
+      begin
+        Add(AText, True);
+        Exit;
+      end;
+    if (APrefix <> '') and (Copy(LFolded, 1, Length(APrefix)) = APrefix) then
+    begin
+      // The shortest start of the word, in whole characters, that folds to
+      // the prefix's length.
+      K := 1;
+      while K <= Length(AText) do
+      begin
+        while (K < Length(AText)) and IsContinuation(AText[K + 1]) do
+          Inc(K);
+        if Length(PcFoldForSearch(Copy(AText, 1, K))) >= Length(APrefix) then
+          Break;
+        Inc(K);
+      end;
+      Add(Copy(AText, 1, K), True);
+      Add(Copy(AText, K + 1, MaxInt), False);
+      Exit;
+    end;
+    Add(AText, False);
+  end;
+
+begin
+  LHighlight := Default(TSearchHighlight);
+  LHighlight.Field := AField;
+  I := 1;
+  while I <= Length(AValue) do
+  begin
+    LStart := I;
+    if IsRawWordChar(AValue[I]) then
+    begin
+      while (I <= Length(AValue)) and IsRawWordChar(AValue[I]) do
+        Inc(I);
+      AddWord(Copy(AValue, LStart, I - LStart));
+    end
+    else
+    begin
+      while (I <= Length(AValue)) and not IsRawWordChar(AValue[I]) do
+        Inc(I);
+      Add(Copy(AValue, LStart, I - LStart), False);
+    end;
+  end;
+  Result := LHighlight;
 end;
 
 procedure AddTokens(var ATokens: TArray<string>; AValue: TJsonValue);
@@ -635,6 +891,42 @@ begin
   end;
 end;
 
+procedure TMockSearchEngine.ReplaceIndex(const ATarget, ASource: string);
+var
+  LSource: TMockIndexData;
+  I, J: Integer;
+begin
+  SearchCheckIndexName(ATarget);
+  SearchCheckIndexName(ASource);
+  if ATarget = ASource then
+    raise ESearchArgumentError.CreateFmt('ReplaceIndex: "%s" can''t replace itself.', [ATarget]);
+  FLock.Enter;
+  try
+    CheckAvailable;
+    ApplyQueue;
+    LSource := RequireIndex(ASource);
+    for I := 0 to High(FNames) do
+      if FNames[I] = ATarget then
+      begin
+        FIndexes[I].Free;
+        for J := I to High(FNames) - 1 do
+        begin
+          FNames[J] := FNames[J + 1];
+          FIndexes[J] := FIndexes[J + 1];
+        end;
+        SetLength(FNames, Length(FNames) - 1);
+        SetLength(FIndexes, Length(FIndexes) - 1);
+        Break;
+      end;
+    for I := 0 to High(FNames) do
+      if FIndexes[I] = LSource then
+        FNames[I] := ATarget;
+    LSource.FSchema := SearchSchemaRenamed(LSource.FSchema, ATarget);
+  finally
+    FLock.Leave;
+  end;
+end;
+
 function TMockSearchEngine.GetDeferWrites: Boolean;
 begin
   FLock.Enter;
@@ -858,6 +1150,18 @@ begin
   FQueueRefs := Copy(FQueueRefs, LCount, MaxInt);
 end;
 
+// Under the lock: applies every queued write, in order.
+procedure TMockSearchEngine.ApplyQueue;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FQueue) do
+    if not FQueue[I].FApplied then
+      Apply(FQueue[I]);
+  FQueue := nil;
+  FQueueRefs := nil;
+end;
+
 function TMockSearchEngine.OpPending(AOp: TMockWriteOp): Boolean;
 begin
   Result := not AOp.FApplied;
@@ -1015,31 +1319,70 @@ begin
   end;
 end;
 
+function TMockSearchEngine.DoListIds(const AIndexName: string;
+  const AFilter: ISearchFilter): TArray<string>;
+var
+  LData: TMockIndexData;
+  I, N: Integer;
+begin
+  FLock.Enter;
+  try
+    CheckAvailable;
+    LData := RequireIndex(AIndexName);
+    if AFilter <> nil then
+      CheckFilter(LData.FSchema, AFilter);
+    SetLength(Result, Length(LData.FIds));
+    N := 0;
+    for I := 0 to High(LData.FIds) do
+      if (AFilter = nil) or Matches(AFilter, LData.FDocs[I]) then
+      begin
+        Result[N] := LData.FIds[I];
+        Inc(N);
+      end;
+    SetLength(Result, N);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TMockSearchEngine.DoSetSynonyms(const AIndexName: string;
+  const AGroups: array of TSearchSynonym);
+var
+  LData: TMockIndexData;
+  I: Integer;
+begin
+  SearchCheckSynonyms(AGroups);
+  FLock.Enter;
+  try
+    CheckAvailable;
+    LData := RequireIndex(AIndexName);
+    SetLength(LData.FSynonyms, Length(AGroups));
+    for I := 0 to High(AGroups) do
+    begin
+      LData.FSynonyms[I] := AGroups[I];
+      LData.FSynonyms[I].Words := Copy(AGroups[I].Words, 0, Length(AGroups[I].Words));
+    end;
+  finally
+    FLock.Leave;
+  end;
+end;
+
 function TMockSearchEngine.DoSearch(const AIndexName: string;
   const ARequest: TSearchRequest): ISearchResult;
 var
   LData: TMockIndexData;
   LSchema: ISearchSchema;
   LField: TSearchField;
-  LWords, LDocTokens: TArray<string>;
+  LWords, LDocTokens, LMarks: TArray<string>;
+  LUnits: TMockUnits;
   LMatch, LLevel, LTmp: TArray<Integer>;
   LResult: TSearchResult;
+  LHit: TSearchHit;
   LFacet: TSearchFacet;
   LSeen: TArray<string>;
   I, J, K, N, W, LCount, LFrom, LTo, LMaxLevel: Integer;
   LDoc, LProjected, V: TJsonValue;
-  LText: string;
-
-  function WordMatches(AWord: Integer): Boolean;
-  var
-    X: Integer;
-  begin
-    for X := 0 to High(LDocTokens) do
-      if (LDocTokens[X] = LWords[AWord])
-        or ((AWord = High(LWords)) and (Copy(LDocTokens[X], 1, Length(LWords[AWord])) = LWords[AWord])) then
-        Exit(True);
-    Result := False;
-  end;
+  LText, LPrefix: string;
 
   // Merge sort of LMatch[ALo..AHi] by the request's sorts (stable).
   function Less(A, B: Integer): Boolean;
@@ -1159,6 +1502,10 @@ begin
       if not LSchema.FindField(ARequest.Facets[I], LField) or not LField.IsFacet then
         raise RequestError(Format('Field "%s" is not a facet in index "%s".',
           [ARequest.Facets[I], LSchema.Name]));
+    for I := 0 to High(ARequest.Highlight) do
+      if not LSchema.FindField(ARequest.Highlight[I], LField) or not LField.IsSearchable then
+        raise RequestError(Format('Field "%s" is not a Text field in index "%s": it can''t be highlighted.',
+          [ARequest.Highlight[I], LSchema.Name]));
     if (ARequest.PageSize > 0) and (Int64(ARequest.Page - 1) * ARequest.PageSize >= LSchema.MaxHits) then
       raise ESearchArgumentError.CreateFmt('Page %d of %d starts past the index''s MaxHits (%d).',
         [ARequest.Page, ARequest.PageSize, LSchema.MaxHits]);
@@ -1166,6 +1513,20 @@ begin
     // Filter and text.
     LText := ARequest.TextToSend;
     LWords := Tokens(LText);
+    LUnits := BuildUnits(LWords, LData.FSynonyms);
+    // What a highlight marks: the query's words and their synonyms' words.
+    LMarks := Copy(LWords, 0, Length(LWords));
+    for I := 0 to High(LUnits) do
+      for J := 0 to High(LUnits[I].Alts) do
+        for K := 0 to High(LUnits[I].Alts[J]) do
+        begin
+          SetLength(LMarks, Length(LMarks) + 1);
+          LMarks[High(LMarks)] := LUnits[I].Alts[J][K];
+        end;
+    if Length(LWords) > 0 then
+      LPrefix := LWords[High(LWords)]
+    else
+      LPrefix := '';
     SetLength(LMatch, Length(LData.FIds));
     SetLength(LLevel, Length(LData.FIds));
     N := 0;
@@ -1175,7 +1536,7 @@ begin
       LDoc := LData.FDocs[I];
       if (ARequest.Filter <> nil) and not Matches(ARequest.Filter, LDoc) then
         Continue;
-      K := Length(LWords);
+      K := Length(LUnits);
       if K > 0 then
       begin
         SetLength(LDocTokens, 0);
@@ -1183,12 +1544,12 @@ begin
           if LSchema.Field(J).IsSearchable then
             AddTokens(LDocTokens, LDoc.Find(LSchema.Field(J).Name));
         K := 0;
-        for W := 0 to High(LWords) do
-          if WordMatches(W) then
+        for W := 0 to High(LUnits) do
+          if UnitMatches(LUnits[W], W = High(LUnits), LDocTokens) then
             Inc(K)
           else
             Break;
-        if (ARequest.Words = swAll) and (K < Length(LWords)) then
+        if (ARequest.Words = swAll) and (K < Length(LUnits)) then
           Continue;
         if K = 0 then
           Continue;
@@ -1205,7 +1566,7 @@ begin
     SetLength(LTmp, N);
     if Length(ARequest.Sorts) > 0 then
       MergeSort(0, N - 1)
-    else if (ARequest.Words = swRelaxed) and (Length(LWords) > 1) then
+    else if (ARequest.Words = swRelaxed) and (Length(LUnits) > 1) then
     begin
       LCount := 0;
       for K := LMaxLevel downto 1 do
@@ -1266,7 +1627,14 @@ begin
               LProjected.AddPair(ARequest.Fields[J], SearchCloneJson(V));
           end;
         end;
-        LResult.AddHit(LData.FIds[LMatch[I]], LProjected);
+        LHit := LResult.AddHit(LData.FIds[LMatch[I]], LProjected);
+        if Length(LWords) > 0 then
+          for J := 0 to High(ARequest.Highlight) do
+          begin
+            V := LDoc.Find(ARequest.Highlight[J]);
+            if (V <> nil) and (V.Kind = jkString) then
+              LHit.AddHighlight(MockHighlight(ARequest.Highlight[J], V.AsString, LMarks, LPrefix));
+          end;
       end;
     end;
   finally
@@ -1317,6 +1685,16 @@ end;
 function TMockSearchIndex.Search(const AText: string): ISearchQuery;
 begin
   Result := TSearchQuery.Create(Self, AText);
+end;
+
+function TMockSearchIndex.ListIds(const AFilter: ISearchFilter): TArray<string>;
+begin
+  Result := FEngine.DoListIds(FName, AFilter);
+end;
+
+procedure TMockSearchIndex.SetSynonyms(const AGroups: array of TSearchSynonym);
+begin
+  FEngine.DoSetSynonyms(FName, AGroups);
 end;
 
 function TMockSearchIndex.ExecuteSearch(const ARequest: TSearchRequest): ISearchResult;

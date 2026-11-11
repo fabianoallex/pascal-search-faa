@@ -15,7 +15,7 @@
     </CompilerOptions>
     <Description Value="pascal-search-faa on Typesense (30.2 probed): the search contract over pascal-common-faa's HTTP client, with TLS verified on both compilers."/>
     <License Value="MIT"/>
-    <Version Minor="1"/>
+    <Version Minor="2"/>
     <Files>
       <Item>
         <Filename Value="..\adapters\typesense\PascalSearch.Typesense.pas"/>
@@ -25,7 +25,7 @@
     <RequiredPkgs>
       <Item>
         <PackageName Value="pascal_search_faa"/>
-        <MinVersion Minor="1" Valid="True"/>
+        <MinVersion Minor="2" Valid="True"/>
       </Item>
       <Item>
         <PackageName Value="pascal_common_faa"/>

@@ -69,16 +69,19 @@ found and a `Delete` of the rest, then **`WaitFor` on both** before the delivery
 
 Every error is raised, so the local sink tries the delivery again later
 (`TOutboxRetry`: 5 s doubling up to 600 s by default) and marks it `dead` after `MaxAttempts`
-(10). A retry loads and writes every id of the event again: upsert and delete are idempotent,
-and the load reads the current state. So:
+(10), or at once for a caller's bug (below). A retry loads and writes every id of the event
+again: upsert and delete are idempotent, and the load reads the current state. So:
 
 - the engine down (`ESearchUnavailable`), a wait that ran out (`ESearchTimeout`), an index not
   there yet (`ESearchIndexNotFound`): the next try gets through;
 - some documents refused (`ESearchWriteFailed`, Typesense) or the whole batch (Meilisearch):
   the next try writes them all again, the good ones included, which does no harm;
 - a bad id in a payload or a loader bug (`ESearchArgumentError`), a request the engine refuses
-  (`ESearchRequestError`): retrying doesn't help, but the delivery uses its 10 tries before going
-  `dead`. `OnError` on the sink reports each try.
+  (`ESearchRequestError`): retrying wouldn't help, so `Handle` raises pascal-db-faa's
+  `EOutboxGiveUp` (0.21.0) instead, its message `ESearchArgumentError: ...`, and the delivery is
+  **`dead` at the first try** (design S30). `Sync` itself still raises the library's errors.
+
+`OnError` on the sink reports each failed try, a given-up one included.
 
 **An engine down longer than the tries leaves dead deliveries**, and those ids stale in the
 index. pascal-db-faa's local sink has one `MaxAttempts` for all its handlers (and one local sink
@@ -93,7 +96,9 @@ deliveries in sequence, and a retry reloads, so this doesn't happen there.
 ## A full reindex
 
 A new index, one rebuilt after a schema change (`ESearchSchemaError`), or a resync after dead
-deliveries: page through your ids and call `Sync`, the handler's own step.
+deliveries: page through your ids and call `Sync`, the handler's own step. Since 0.2.0 the
+better way fills a **new** index beside the live one and replaces it (guide 9): a handler on the
+new index, the same loop, then `ReplaceIndex`.
 
 ```pascal
 LIds := LCatalog.ProductIds;          // or page with SQL, 100 at a time
@@ -106,8 +111,9 @@ begin
 end;
 ```
 
-- **In place** (the index kept): every row is written again, but documents whose rows no longer
-  exist stay. The library can't list an index past its `MaxHits`, so it can't find them.
+- **Beside the live index, then `ReplaceIndex`** (guide 9): no empty index, no orphan documents.
+- **In place** (the index kept): every row is written again; documents whose rows no longer
+  exist stay, unless `ListIds` finds them and they are deleted (guide 9).
 - **Dropping the index first** (`DropIndex`, `EnsureIndex`) removes them, but searches see an
   index that fills while the loop runs.
 

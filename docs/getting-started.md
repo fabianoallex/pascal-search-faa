@@ -21,8 +21,8 @@ Each `*-faa` library is the application's own git submodule (one copy per applic
 - [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0 or later for
   the core, **1.31.0 or later** with an adapter (its HTTP client);
 - [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa) 0.7.0 or later;
-- [pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.18.0 or later, only for the
-  outbox bridge (guide 7).
+- [pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.21.0 or later, only for the
+  outbox bridge (guide 7; 0.21.0 brought `EOutboxGiveUp`).
 
 **Delphi**: add to the search path `src/` of this library and of pascal-common-faa and
 pascal-jsonmapper-faa, plus `adapters/meilisearch` or `adapters/typesense` (and

@@ -40,15 +40,30 @@
   - Search uses page/hitsPerPage, which give an exact total (finding 33), and
     matchingStrategy "all" or "last" (swAll, swRelaxed). A page that starts
     past MaxHits raises ESearchArgumentError; for an index this engine
-    didn't ensure, MaxHits is read once from the index's settings.
+    didn't ensure, MaxHits is read from the index's settings and kept
+    CacheMs (60 s by default), so another process's ReplaceIndex is seen.
+  - Highlight: attributesToHighlight with #1/#2 as the tags (findings 62,
+    71), read from _formatted, which is taken out of the hit's document.
+    Meilisearch highlights any attribute: the Text-field check is the
+    mock's and Typesense's only.
+  - ReplaceIndex swaps the target with the source (/swap-indexes, atomic,
+    finding 57) and drops the source, which then holds the old documents;
+    a missing target is renamed into ("rename": true, finding 58).
+  - ListIds pages POST /documents/fetch (fields ["id"], 1000 a page), which
+    isn't capped by maxTotalHits (finding 61).
+  - SetSynonyms writes the synonyms setting: each word of an equivalent
+    group a key to the others, a one-way root a key to its words.
   - Filters are written by MeilisearchFilterText: every string in double
     quotes, with backslash and quote escaped (finding 21).
   - Errors: 401/403 ESearchAuthError, index_not_found ESearchIndexNotFound,
     5xx and no answer ESearchUnavailable, any other 4xx ESearchRequestError,
     with Meilisearch's code and message in EngineCode and EngineMessage.
 
-  Native access (S20): IMeilisearchEngine.Send for any endpoint, with the key
-  and the error mapping applied, and WaitForTask for the tasks it starts. *)
+  Native access (S20, S29): IMeilisearchEngine.Send for any endpoint, with
+  the key and the error mapping applied, WaitForTask for the tasks it
+  starts, and SetTypoTolerance, SetRankingRules and SetStopWords, each
+  waiting for its task. Like the synonyms, these settings belong to the
+  index: set them on a rebuilt index before ReplaceIndex. *)
 
 interface
 
@@ -64,6 +79,8 @@ uses
 const
   /// TMeilisearchConfig.WaitTimeoutMs = 0.
   MEILISEARCH_DEFAULT_WAIT_MS = 30000;
+  /// TMeilisearchConfig.CacheMs = 0.
+  MEILISEARCH_DEFAULT_CACHE_MS = 60000;
 
 type
   TMeilisearchConfig = record
@@ -77,12 +94,28 @@ type
     /// What WaitFor(0) and the engine's own waits allow a task.
     /// 0 = MEILISEARCH_DEFAULT_WAIT_MS.
     WaitTimeoutMs: Integer;
+    /// How long an index's MaxHits read from the server is kept.
+    /// 0 = MEILISEARCH_DEFAULT_CACHE_MS.
+    CacheMs: Integer;
     /// The HTTP transport: Http.Tls.CaFile for a private CA (PEM), CertFile/
     /// KeyFile/CertPassword for a client certificate, the pool's limits.
     /// Zeroed: https verified against the system store and the host name.
     /// Http.Tls.SkipServerVerification is INSECURE: for a lab only.
     Http: TPcHttpOptions;
     class function Create(const AUrl: string; const AApiKey: string = ''): TMeilisearchConfig; static;
+  end;
+
+  /// The typoTolerance setting (finding 69).
+  TMeilisearchTypoTolerance = record
+    Enabled: Boolean;
+    /// The shortest word that accepts one typo, and two.
+    OneTypo: Integer;
+    TwoTypos: Integer;
+    /// Words and attributes searched without typos.
+    DisableOnWords: TArray<string>;
+    DisableOnAttributes: TArray<string>;
+    /// Meilisearch's own: enabled, 5 and 9, nothing disabled.
+    class function Standard: TMeilisearchTypoTolerance; static;
   end;
 
   IMeilisearchEngine = interface(ISearchEngine)
@@ -95,6 +128,13 @@ type
     /// Waits for a task (the taskUid of a Send's answer). Raises
     /// ESearchTimeout, or the task's error mapped as an answer's would be.
     procedure WaitForTask(ATaskUid: Int64; ATimeoutMs: Integer = 0);
+    /// The index's typoTolerance setting; returns once applied.
+    procedure SetTypoTolerance(const AIndexName: string; const AValue: TMeilisearchTypoTolerance);
+    /// The index's rankingRules ('words', 'typo', 'proximity', 'attribute',
+    /// 'sort', 'exactness', 'price:asc'...); returns once applied.
+    procedure SetRankingRules(const AIndexName: string; const ARules: array of string);
+    /// The index's stopWords; returns once applied.
+    procedure SetStopWords(const AIndexName: string; const AWords: array of string);
   end;
 
   /// A task as GET /tasks/{uid} reports it.
@@ -116,6 +156,7 @@ type
     FLock: TCriticalSection;
     FMaxHitsNames: TArray<string>;
     FMaxHitsValues: TArray<Integer>;
+    FMaxHitsAt: TArray<UInt64>;
     function WaitLimit(ATimeoutMs: Integer): Integer;
     function Exchange(const AMethod, APath, ABody: string): TPcHttpResponse;
     procedure RaiseAnswer(const AMethod, APath: string; const AResponse: TPcHttpResponse);
@@ -130,6 +171,7 @@ type
     procedure CacheMaxHits(const AName: string; AValue: Integer);
     procedure ForgetMaxHits(const AName: string);
     function MaxHitsOf(const AName: string): Integer;
+    procedure PutSetting(const AIndexName, ASetting, AMethod, ABody: string);
   public
     /// Raises ESearchArgumentError for a URL that isn't http(s) or has a path.
     class function New(const AConfig: TMeilisearchConfig): IMeilisearchEngine; overload;
@@ -146,7 +188,16 @@ type
     function Index(const AName: string): ISearchIndex;
     function IndexExists(const AName: string): Boolean;
     procedure DropIndex(const AName: string);
+    procedure ReplaceIndex(const ATarget, ASource: string);
+    procedure SetTypoTolerance(const AIndexName: string; const AValue: TMeilisearchTypoTolerance);
+    procedure SetRankingRules(const AIndexName: string; const ARules: array of string);
+    procedure SetStopWords(const AIndexName: string; const AWords: array of string);
   end;
+
+/// The synonyms setting for AGroups: each word of an equivalent group a key
+/// to the others, a one-way root a key to its words; a key in several
+/// groups gets all their words, once each.
+function MeilisearchSynonymsJson(const AGroups: array of TSearchSynonym): string;
 
 /// AFilter in Meilisearch's syntax: strings in double quotes with '\' and
 /// '"' escaped, numbers in plain decimal, instants as Unix milliseconds,
@@ -177,6 +228,8 @@ const
   ENGINE_NAME = 'Meilisearch';
   POLL_FIRST_MS = 5;
   POLL_MAX_MS = 200;
+  /// Ids per page of ListIds.
+  LIST_PAGE = 1000;
 
 type
   TMeilisearchIndex = class(TInterfacedObject, ISearchIndex, ISearchExecutor)
@@ -195,6 +248,8 @@ type
     function Get(const AId: string): ISearchHit;
     function GetMany(const AIds: array of string): ISearchHits;
     function Search(const AText: string): ISearchQuery;
+    function ListIds(const AFilter: ISearchFilter = nil): TArray<string>;
+    procedure SetSynonyms(const AGroups: array of TSearchSynonym);
     function ExecuteSearch(const ARequest: TSearchRequest): ISearchResult;
   end;
 
@@ -307,6 +362,87 @@ end;
 function ParseBody(const ABody, AWhat: string): TJsonValue;
 begin
   Result := SearchParseAnswer(ABody, ENGINE_NAME + ' ' + AWhat);
+end;
+
+function MeilisearchSynonymsJson(const AGroups: array of TSearchSynonym): string;
+var
+  LKeys: TArray<string>;
+  LValues: TArray<TArray<string>>;
+  W: TJsonWriter;
+  I, J, K: Integer;
+
+  procedure Add(const AKey, AWord: string);
+  var
+    X, Y: Integer;
+  begin
+    for X := 0 to High(LKeys) do
+      if LKeys[X] = AKey then
+      begin
+        for Y := 0 to High(LValues[X]) do
+          if LValues[X][Y] = AWord then
+            Exit;
+        SetLength(LValues[X], Length(LValues[X]) + 1);
+        LValues[X][High(LValues[X])] := AWord;
+        Exit;
+      end;
+    SetLength(LKeys, Length(LKeys) + 1);
+    SetLength(LValues, Length(LValues) + 1);
+    LKeys[High(LKeys)] := AKey;
+    SetLength(LValues[High(LValues)], 1);
+    LValues[High(LValues)][0] := AWord;
+  end;
+
+begin
+  LKeys := nil;
+  LValues := nil;
+  for I := 0 to High(AGroups) do
+    if AGroups[I].IsOneWay then
+    begin
+      for J := 0 to High(AGroups[I].Words) do
+        Add(AGroups[I].Root, AGroups[I].Words[J]);
+    end
+    else
+      for J := 0 to High(AGroups[I].Words) do
+        for K := 0 to High(AGroups[I].Words) do
+          if J <> K then
+            Add(AGroups[I].Words[J], AGroups[I].Words[K]);
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    for I := 0 to High(LKeys) do
+      SearchWriteStrings(W, LKeys[I], LValues[I]);
+    W.EndObject;
+    Result := W.ToString;
+  finally
+    W.Free;
+  end;
+end;
+
+function StringsJson(const AItems: array of string): string;
+var
+  W: TJsonWriter;
+  I: Integer;
+begin
+  W := TJsonWriter.Create;
+  try
+    W.BeginArray;
+    for I := 0 to High(AItems) do
+      W.WriteString(AItems[I]);
+    W.EndArray;
+    Result := W.ToString;
+  finally
+    W.Free;
+  end;
+end;
+
+{ TMeilisearchTypoTolerance }
+
+class function TMeilisearchTypoTolerance.Standard: TMeilisearchTypoTolerance;
+begin
+  Result := Default(TMeilisearchTypoTolerance);
+  Result.Enabled := True;
+  Result.OneTypo := 5;
+  Result.TwoTypos := 9;
 end;
 
 { TMeilisearchConfig }
@@ -615,12 +751,15 @@ end;
 
 function TMeilisearchEngine.CachedMaxHits(const AName: string; out AValue: Integer): Boolean;
 var
-  I: Integer;
+  I, LLimit: Integer;
 begin
+  LLimit := FConfig.CacheMs;
+  if LLimit <= 0 then
+    LLimit := MEILISEARCH_DEFAULT_CACHE_MS;
   FLock.Enter;
   try
     for I := 0 to High(FMaxHitsNames) do
-      if FMaxHitsNames[I] = AName then
+      if (FMaxHitsNames[I] = AName) and (TTicker.ElapsedMs(FMaxHitsAt[I]) < UInt64(LLimit)) then
       begin
         AValue := FMaxHitsValues[I];
         Exit(True);
@@ -642,13 +781,16 @@ begin
       if FMaxHitsNames[I] = AName then
       begin
         FMaxHitsValues[I] := AValue;
+        FMaxHitsAt[I] := TTicker.NowMs;
         Exit;
       end;
     N := Length(FMaxHitsNames);
     SetLength(FMaxHitsNames, N + 1);
     SetLength(FMaxHitsValues, N + 1);
+    SetLength(FMaxHitsAt, N + 1);
     FMaxHitsNames[N] := AName;
     FMaxHitsValues[N] := AValue;
+    FMaxHitsAt[N] := TTicker.NowMs;
   finally
     FLock.Leave;
   end;
@@ -667,9 +809,11 @@ begin
         begin
           FMaxHitsNames[J] := FMaxHitsNames[J + 1];
           FMaxHitsValues[J] := FMaxHitsValues[J + 1];
+          FMaxHitsAt[J] := FMaxHitsAt[J + 1];
         end;
         SetLength(FMaxHitsNames, Length(FMaxHitsNames) - 1);
         SetLength(FMaxHitsValues, Length(FMaxHitsValues) - 1);
+        SetLength(FMaxHitsAt, Length(FMaxHitsAt) - 1);
         Exit;
       end;
   finally
@@ -837,6 +981,103 @@ begin
   LTask := AwaitTask(TaskUidOf(LResponse.Body, 'DELETE ' + LPath), 0);
   if LTask.ErrorCode <> 'index_not_found' then
     RaiseTask(LTask, 'drop index "' + AName + '"');
+end;
+
+procedure TMeilisearchEngine.ReplaceIndex(const ATarget, ASource: string);
+var
+  LKey, LBody: string;
+  LTargetExists: Boolean;
+  W: TJsonWriter;
+begin
+  SearchCheckIndexName(ATarget);
+  SearchCheckIndexName(ASource);
+  if ATarget = ASource then
+    raise ESearchArgumentError.CreateFmt('ReplaceIndex: "%s" can''t replace itself.', [ATarget]);
+  RequireIndex(ASource);
+  LTargetExists := FindIndexInfo(ATarget, LKey);
+  W := TJsonWriter.Create;
+  try
+    W.BeginArray;
+    W.BeginObject;
+    W.Name('indexes');
+    W.BeginArray;
+    // A swap is symmetric; a rename goes from the first to the second.
+    if LTargetExists then
+    begin
+      W.WriteString(ATarget);
+      W.WriteString(ASource);
+    end
+    else
+    begin
+      W.WriteString(ASource);
+      W.WriteString(ATarget);
+    end;
+    W.EndArray;
+    if not LTargetExists then
+    begin
+      W.Name('rename');
+      W.WriteBoolean(True);
+    end;
+    W.EndObject;
+    W.EndArray;
+    LBody := W.ToString;
+  finally
+    W.Free;
+  end;
+  ForgetMaxHits(ATarget);
+  ForgetMaxHits(ASource);
+  RaiseTask(AwaitTask(StartTask('POST', '/swap-indexes', LBody), 0),
+    Format('replace index "%s" with "%s"', [ATarget, ASource]));
+  // After a swap the source holds what the target held.
+  if LTargetExists then
+    DropIndex(ASource);
+end;
+
+procedure TMeilisearchEngine.PutSetting(const AIndexName, ASetting, AMethod, ABody: string);
+begin
+  SearchCheckIndexName(AIndexName);
+  // A settings call on a missing index would create it, without the schema.
+  RequireIndex(AIndexName);
+  RaiseTask(AwaitTask(StartTask(AMethod, '/indexes/' + Seg(AIndexName) + '/settings/' + ASetting, ABody), 0),
+    Format('%s of index "%s"', [ASetting, AIndexName]));
+end;
+
+procedure TMeilisearchEngine.SetTypoTolerance(const AIndexName: string;
+  const AValue: TMeilisearchTypoTolerance);
+var
+  W: TJsonWriter;
+  LBody: string;
+begin
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    W.Name('enabled');
+    W.WriteBoolean(AValue.Enabled);
+    W.Name('minWordSizeForTypos');
+    W.BeginObject;
+    W.Name('oneTypo');
+    W.WriteInt64(AValue.OneTypo);
+    W.Name('twoTypos');
+    W.WriteInt64(AValue.TwoTypos);
+    W.EndObject;
+    SearchWriteStrings(W, 'disableOnWords', AValue.DisableOnWords);
+    SearchWriteStrings(W, 'disableOnAttributes', AValue.DisableOnAttributes);
+    W.EndObject;
+    LBody := W.ToString;
+  finally
+    W.Free;
+  end;
+  PutSetting(AIndexName, 'typo-tolerance', 'PATCH', LBody);
+end;
+
+procedure TMeilisearchEngine.SetRankingRules(const AIndexName: string; const ARules: array of string);
+begin
+  PutSetting(AIndexName, 'ranking-rules', 'PUT', StringsJson(ARules));
+end;
+
+procedure TMeilisearchEngine.SetStopWords(const AIndexName: string; const AWords: array of string);
+begin
+  PutSetting(AIndexName, 'stop-words', 'PUT', StringsJson(AWords));
 end;
 
 { TMeilisearchIndex }
@@ -1036,6 +1277,61 @@ begin
   Result := TSearchQuery.Create(Self, AText);
 end;
 
+function TMeilisearchIndex.ListIds(const AFilter: ISearchFilter): TArray<string>;
+var
+  W: TJsonWriter;
+  LJson, LResults: TJsonValue;
+  LOffset, LCount, I: Integer;
+begin
+  Result := nil;
+  LCount := 0;
+  LOffset := 0;
+  repeat
+    W := TJsonWriter.Create;
+    try
+      W.BeginObject;
+      W.Name('offset');
+      W.WriteInt64(LOffset);
+      W.Name('limit');
+      W.WriteInt64(LIST_PAGE);
+      SearchWriteStrings(W, 'fields', ['id']);
+      if AFilter <> nil then
+      begin
+        W.Name('filter');
+        W.WriteString(MeilisearchFilterText(AFilter));
+      end;
+      W.EndObject;
+      LJson := ParseBody(FEngine.Call('POST', FPath + '/documents/fetch', W.ToString), 'POST documents/fetch');
+    finally
+      W.Free;
+    end;
+    try
+      LResults := SearchJsonMember(LJson, 'results');
+      if (LResults = nil) or (LResults.Kind <> jkArray) then
+        raise ESearchUnavailable.CreateEngine(Format('%s POST %s/documents/fetch: the answer has no results.',
+          [ENGINE_NAME, FPath]), 0, '', '');
+      if LCount + LResults.Count > Length(Result) then
+        SetLength(Result, LCount + LResults.Count);
+      for I := 0 to LResults.Count - 1 do
+      begin
+        Result[LCount] := SearchJsonId(SearchJsonMember(LResults.Items[I], 'id'));
+        Inc(LCount);
+      end;
+      Inc(LOffset, LResults.Count);
+      I := LResults.Count;
+    finally
+      LJson.Free;
+    end;
+  until I < LIST_PAGE;
+  SetLength(Result, LCount);
+end;
+
+procedure TMeilisearchIndex.SetSynonyms(const AGroups: array of TSearchSynonym);
+begin
+  SearchCheckSynonyms(AGroups);
+  FEngine.PutSetting(FName, 'synonyms', 'PUT', MeilisearchSynonymsJson(AGroups));
+end;
+
 function SearchJson(const ARequest: TSearchRequest): string;
 var
   W: TJsonWriter;
@@ -1105,6 +1401,14 @@ begin
     end;
     if (Length(ARequest.Facets) > 0) and Mine('facets') then
       SearchWriteStrings(W, 'facets', ARequest.Facets);
+    if (Length(ARequest.Highlight) > 0) and Mine('attributesToHighlight') then
+    begin
+      SearchWriteStrings(W, 'attributesToHighlight', ARequest.Highlight);
+      W.Name('highlightPreTag');
+      W.WriteString(SEARCH_HIGHLIGHT_START);
+      W.Name('highlightPostTag');
+      W.WriteString(SEARCH_HIGHLIGHT_END);
+    end;
     if (Length(ARequest.Fields) > 0) and Mine('attributesToRetrieve') then
     begin
       LFields := Copy(ARequest.Fields, 0, Length(ARequest.Fields));
@@ -1140,10 +1444,12 @@ function TMeilisearchIndex.ExecuteSearch(const ARequest: TSearchRequest): ISearc
 var
   LMaxHits: Integer;
   LText, LWhat: string;
-  LJson, LHits, LHit, LDist, LValues: TJsonValue;
+  LJson, LHits, LHit, LDist, LValues, LFormatted, V: TJsonValue;
   LTotal: Int64;
   LResult: TSearchResult;
+  LOut: TSearchHit;
   LFacet: TSearchFacet;
+  LHighlight: TSearchHighlight;
   I, J: Integer;
 begin
   if (ARequest.PageSize > 0) and (ARequest.Page > 1) then
@@ -1168,7 +1474,16 @@ begin
       for I := 0 to LHits.Count - 1 do
       begin
         LHit := LHits.Items[I];
-        LResult.AddHit(SearchJsonId(LHit.Find('id')), SearchCloneJson(LHit));
+        LOut := LResult.AddHit(SearchJsonId(LHit.Find('id')), SearchCloneJsonWithout(LHit, '_formatted'));
+        LFormatted := SearchJsonMember(LHit, '_formatted');
+        if LFormatted <> nil then
+          for J := 0 to High(ARequest.Highlight) do
+          begin
+            V := SearchJsonMember(LFormatted, ARequest.Highlight[J]);
+            if (V <> nil) and (V.Kind = jkString)
+              and SearchHighlightFromMarked(ARequest.Highlight[J], V.AsString, LHighlight) then
+              LOut.AddHighlight(LHighlight);
+          end;
       end;
     LDist := LJson.Find('facetDistribution');
     for I := 0 to High(ARequest.Facets) do

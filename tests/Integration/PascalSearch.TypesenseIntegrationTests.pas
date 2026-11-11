@@ -12,6 +12,9 @@
     the collection's metadata (read by another engine, changed in place,
     a kind change refused), a collection made without the library, the
     native access.
+  - 0.2.0 (design S25-S29): an index is an alias to its own collection;
+    ReplaceIndex onto a collection made by 0.1.0; the synonym set deleted
+    after its collection; a curation set pinning and hiding documents.
 
   Each test uses its own collections (it_*), dropped before and after.
 
@@ -26,6 +29,7 @@ uses
   DUnitX.TestFramework,
   PascalSearch.DUnitXCompat,
   SysUtils,
+  PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Schema,
   PascalSearch.Documents,
@@ -59,6 +63,10 @@ type
     [Test] procedure Schema_NoTextFields;
     [Test] procedure Collection_MadeWithoutTheLibrary;
     [Test] procedure Native_Send;
+    [Test] procedure Index_IsAnAliasToItsCollection;
+    [Test] procedure ReplaceIndex_OntoA010Collection;
+    [Test] procedure Synonyms_SetDeletedWithTheIndex;
+    [Test] procedure Curation_PinsAndHides;
   end;
 
 implementation
@@ -67,6 +75,7 @@ const
   IDX = 'it_ts';
   NEVER = 'it_ts_never';
   FOREIGN = 'it_ts_foreign';
+  STAGING = 'it_ts_new';
 
 { TTypesenseIntegrationTests }
 
@@ -76,6 +85,7 @@ begin
   FEngine.DropIndex(IDX);
   FEngine.DropIndex(NEVER);
   FEngine.DropIndex(FOREIGN);
+  FEngine.DropIndex(STAGING);
 end;
 
 procedure TTypesenseIntegrationTests.TearDown;
@@ -86,6 +96,7 @@ begin
       FEngine.DropIndex(IDX);
       FEngine.DropIndex(NEVER);
       FEngine.DropIndex(FOREIGN);
+      FEngine.DropIndex(STAGING);
     end;
   except
     // The next Setup drops them again.
@@ -287,6 +298,129 @@ begin
     on E: ESearchIndexNotFound do
       TAssert.AssertEquals(404, E.HttpStatus);
   end;
+end;
+
+// The member AMember of the JSON object AText, as JSON text.
+function MemberJson(const AText, AMember: string): string;
+var
+  LJson, V: TJsonValue;
+begin
+  LJson := ParseJson(AText);
+  try
+    V := LJson.Find(AMember);
+    if V = nil then
+      Result := ''
+    else if V.Kind = jkString then
+      Result := V.AsString
+    else
+      Result := V.ToJson;
+  finally
+    LJson.Free;
+  end;
+end;
+
+// The collection behind the alias AName.
+function CollectionOf(const AEngine: ITypesenseEngine; const AName: string): string;
+begin
+  Result := MemberJson(AEngine.Send('GET', '/aliases/' + AName), 'collection_name');
+end;
+
+procedure TTypesenseIntegrationTests.Index_IsAnAliasToItsCollection;
+var
+  LCollection: string;
+begin
+  FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'))
+    .Upsert([TSearchDocument.New('1').Str('title', 'café')]).WaitFor;
+  LCollection := CollectionOf(FEngine, IDX);
+  TAssert.AssertTrue(LCollection, Pos(IDX + '@', LCollection) = 1);
+  TAssert.AssertEquals('1', MemberJson(FEngine.Send('GET', '/collections/' + IDX), 'num_documents'));
+  FEngine.DropIndex(IDX);
+  TAssert.AssertFalse(FEngine.IndexExists(IDX));
+  try
+    FEngine.Send('GET', '/collections/' + LCollection);
+    TAssert.Fail('The collection must be gone');
+  except
+    on ESearchIndexNotFound do
+      TAssert.AssertTrue(True);
+  end;
+  try
+    FEngine.Send('GET', '/aliases/' + IDX);
+    TAssert.Fail('The alias must be gone');
+  except
+    on ESearchError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TTypesenseIntegrationTests.ReplaceIndex_OntoA010Collection;
+var
+  LSchema: ISearchSchema;
+begin
+  // What 0.1.0 made: a collection named like the index, no alias.
+  LSchema := TSearchSchema.New(IDX).Text('title');
+  FEngine.Send('POST', '/collections', TypesenseCollectionJson(LSchema));
+  FEngine.Index(IDX).Upsert([TSearchDocument.New('old').Str('title', 'velho')]).WaitFor;
+  TAssert.AssertEquals('old', FEngine.Index(IDX).Search('').Execute.Hit(0).Id);
+  FEngine.EnsureIndex(SearchSchemaRenamed(LSchema, STAGING))
+    .Upsert([TSearchDocument.New('new').Str('title', 'novo')]).WaitFor;
+  FEngine.ReplaceIndex(IDX, STAGING);
+  TAssert.AssertEquals('new', FEngine.Index(IDX).Search('').Execute.Hit(0).Id);
+  TAssert.AssertEquals(Int64(1), FEngine.Index(IDX).Search('').Execute.Total);
+  TAssert.AssertTrue('now an alias', Pos(STAGING + '@', CollectionOf(FEngine, IDX)) = 1);
+  TAssert.AssertFalse(FEngine.IndexExists(STAGING));
+  // A 0.1.0 collection can't be the source.
+  FEngine.DropIndex(FOREIGN);
+  FEngine.Send('POST', '/collections', TypesenseCollectionJson(TSearchSchema.New(FOREIGN).Text('title')));
+  try
+    FEngine.ReplaceIndex(IDX, FOREIGN);
+    TAssert.Fail('A 0.1.0 source must raise');
+  except
+    on ESearchNotSupported do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TTypesenseIntegrationTests.Synonyms_SetDeletedWithTheIndex;
+var
+  LIndex: ISearchIndex;
+  LCollection: string;
+begin
+  LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+  LIndex.Upsert([TSearchDocument.New('1').Str('title', 'televisão'),
+    TSearchDocument.New('2').Str('title', 'geladeira')]).WaitFor;
+  LIndex.SetSynonyms([TSearchSynonym.Equivalent(['tv', 'televisão'])]);
+  TAssert.AssertEquals(Int64(1), LIndex.Search('tv').Execute.Total);
+  LCollection := CollectionOf(FEngine, IDX);
+  TAssert.AssertTrue(Pos('televisão', FEngine.Send('GET', '/synonym_sets/' + LCollection)) > 0);
+  TAssert.AssertEquals('attached', '["' + LCollection + '"]',
+    MemberJson(FEngine.Send('GET', '/collections/' + IDX), 'synonym_sets'));
+  FEngine.DropIndex(IDX);
+  try
+    FEngine.Send('GET', '/synonym_sets/' + LCollection);
+    TAssert.Fail('The set must be gone with the index');
+  except
+    on ESearchError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TTypesenseIntegrationTests.Curation_PinsAndHides;
+var
+  LIndex: ISearchIndex;
+  R: ISearchResult;
+  I: Integer;
+begin
+  LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+  LIndex.Upsert([TSearchDocument.New('1').Str('title', 'geladeira'),
+    TSearchDocument.New('2').Str('title', 'geladeira duplex'),
+    TSearchDocument.New('3').Str('title', 'refrigerador')]).WaitFor;
+  FEngine.SetCuration(IDX, [TTypesenseCuration.Create('pin', 'geladeira', ['3'], ['1'])]);
+  R := LIndex.Search('geladeira').Execute;
+  TAssert.AssertEquals('pinned first', '3', R.Hit(0).Id);
+  for I := 0 to R.Count - 1 do
+    TAssert.AssertTrue('hidden', R.Hit(I).Id <> '1');
+  FEngine.SetCuration(IDX, []);
+  TAssert.AssertEquals('cleared', Int64(2), LIndex.Search('geladeira').Execute.Total);
 end;
 
 initialization

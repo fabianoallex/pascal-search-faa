@@ -9,9 +9,12 @@
   descending, then value).
 
   Checked by the builder (ESearchArgumentError): field names in OrderBy,
-  Facets and Fields; page from 1 and page size 0-250; a Raw parameter's name
-  and JSON. Checked by the index when it runs the query: the page against
-  the schema's MaxHits, and (by the engine) whether fields are declared. }
+  Facets, Fields and Highlight; page from 1 and page size 0-250; a Raw
+  parameter's name and JSON. Checked by the index when it runs the query:
+  the page against the schema's MaxHits, and (by the engine) whether fields
+  are declared.
+
+  SearchCheckSynonyms is the check every SetSynonyms makes first. }
 
 interface
 
@@ -38,6 +41,7 @@ type
     function Words(AWords: TSearchWords): ISearchQuery;
     function TextMode(AMode: TSearchTextMode): ISearchQuery;
     function Raw(const AName, AJsonText: string): ISearchQuery;
+    function Highlight(const AFields: array of string): ISearchQuery;
     function Request: TSearchRequest;
     function Execute: ISearchResult;
   end;
@@ -46,20 +50,24 @@ type
   private
     FId: string;
     FDocument: TJsonValue;
+    FHighlights: TArray<TSearchHighlight>;
   public
     /// Takes ownership of ADocument.
     constructor Create(const AId: string; ADocument: TJsonValue);
     destructor Destroy; override;
+    /// A field with no part matched is left out.
+    procedure AddHighlight(const AHighlight: TSearchHighlight);
     function Id: string;
     function Document: TJsonValue;
+    function FindHighlight(const AField: string; out AHighlight: TSearchHighlight): Boolean;
   end;
 
   TSearchHitList = class(TInterfacedObject, ISearchHits)
   private
     FHits: TArray<ISearchHit>;
   public
-    /// Takes ownership of ADocument.
-    procedure AddHit(const AId: string; ADocument: TJsonValue);
+    /// Takes ownership of ADocument. The hit is returned for its highlights.
+    function AddHit(const AId: string; ADocument: TJsonValue): TSearchHit;
     function Count: Integer;
     function Hit(AIndex: Integer): ISearchHit;
   end;
@@ -86,6 +94,10 @@ type
 
 /// Count descending, then value by ordinal: the contract's facet order.
 procedure SearchSortFacetValues(var AValues: TArray<TSearchFacetValue>);
+
+/// Raises ESearchArgumentError for a blank word, an equivalent group with
+/// fewer than two words, a one-way group without words.
+procedure SearchCheckSynonyms(const AGroups: array of TSearchSynonym);
 
 implementation
 
@@ -117,6 +129,31 @@ begin
       Dec(J);
     end;
     AValues[J + 1] := LItem;
+  end;
+end;
+
+procedure SearchCheckSynonyms(const AGroups: array of TSearchSynonym);
+var
+  I, J: Integer;
+begin
+  for I := 0 to High(AGroups) do
+  begin
+    if AGroups[I].IsOneWay then
+    begin
+      if Trim(AGroups[I].Root) <> AGroups[I].Root then
+        raise ESearchArgumentError.CreateFmt('Synonym group %d: the root "%s" has blanks around it.',
+          [I, AGroups[I].Root]);
+      if Length(AGroups[I].Words) < 1 then
+        raise ESearchArgumentError.CreateFmt('Synonym group %d: the root "%s" has no words.',
+          [I, AGroups[I].Root]);
+    end
+    else if Length(AGroups[I].Words) < 2 then
+      raise ESearchArgumentError.CreateFmt('Synonym group %d: an equivalent group needs two words or more.',
+        [I]);
+    for J := 0 to High(AGroups[I].Words) do
+      if (Trim(AGroups[I].Words[J]) = '') or (Trim(AGroups[I].Words[J]) <> AGroups[I].Words[J]) then
+        raise ESearchArgumentError.CreateFmt('Synonym group %d: the word "%s" is blank or has blanks ' +
+          'around it.', [I, AGroups[I].Words[J]]);
   end;
 end;
 
@@ -239,6 +276,18 @@ begin
   FRequest.Raw[N].JsonText := AJsonText;
 end;
 
+function TSearchQuery.Highlight(const AFields: array of string): ISearchQuery;
+var
+  I: Integer;
+begin
+  Result := Self;
+  for I := 0 to High(AFields) do
+    SearchCheckFieldName(AFields[I]);
+  SetLength(FRequest.Highlight, Length(AFields));
+  for I := 0 to High(AFields) do
+    FRequest.Highlight[I] := AFields[I];
+end;
+
 function TSearchQuery.Request: TSearchRequest;
 begin
   Result := FRequest;
@@ -274,15 +323,46 @@ begin
   Result := FDocument;
 end;
 
+procedure TSearchHit.AddHighlight(const AHighlight: TSearchHighlight);
+var
+  I, N: Integer;
+  LAny: Boolean;
+begin
+  LAny := False;
+  for I := 0 to High(AHighlight.Parts) do
+    if AHighlight.Parts[I].Matched then
+      LAny := True;
+  if not LAny then
+    Exit;
+  N := Length(FHighlights);
+  SetLength(FHighlights, N + 1);
+  FHighlights[N] := AHighlight;
+end;
+
+function TSearchHit.FindHighlight(const AField: string; out AHighlight: TSearchHighlight): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(FHighlights) do
+    if FHighlights[I].Field = AField then
+    begin
+      AHighlight := FHighlights[I];
+      Exit(True);
+    end;
+  AHighlight := Default(TSearchHighlight);
+  Result := False;
+end;
+
 { TSearchHitList }
 
-procedure TSearchHitList.AddHit(const AId: string; ADocument: TJsonValue);
+function TSearchHitList.AddHit(const AId: string; ADocument: TJsonValue): TSearchHit;
 var
   N: Integer;
 begin
   N := Length(FHits);
   SetLength(FHits, N + 1);
-  FHits[N] := TSearchHit.Create(AId, ADocument);
+  Result := TSearchHit.Create(AId, ADocument);
+  FHits[N] := Result;
 end;
 
 function TSearchHitList.Count: Integer;

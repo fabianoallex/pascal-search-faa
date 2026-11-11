@@ -64,6 +64,12 @@ type
     [Test] procedure Query_Refusals;
     [Test] procedure WordsText_RemovesOperators;
     [Test] procedure FacetValues_Order;
+    [Test] procedure Highlight_FromMarked;
+    [Test] procedure Highlight_ToHtml_Escapes;
+    [Test] procedure Highlight_QueryChecksFieldNames;
+    [Test] procedure Synonym_Builders;
+    [Test] procedure Synonym_Refusals;
+    [Test] procedure Schema_Renamed;
   end;
 
 implementation
@@ -627,6 +633,110 @@ begin
   TAssert.AssertEquals('bebida', V[1].Value);
   TAssert.AssertEquals('Bar', V[2].Value);
   TAssert.AssertEquals('salgado', V[3].Value);
+end;
+
+procedure TCoreTests.Highlight_FromMarked;
+var
+  H: TSearchHighlight;
+begin
+  TAssert.AssertTrue(SearchHighlightFromMarked('title', #1'Caf'#2'é com '#1'leite'#2, H));
+  TAssert.AssertEquals('title', H.Field);
+  TAssert.AssertEquals(3, Length(H.Parts));
+  TAssert.AssertEquals('Caf', H.Parts[0].Text);
+  TAssert.AssertTrue(H.Parts[0].Matched);
+  TAssert.AssertEquals('é com ', H.Parts[1].Text);
+  TAssert.AssertFalse(H.Parts[1].Matched);
+  TAssert.AssertEquals('leite', H.Parts[2].Text);
+  TAssert.AssertTrue(H.Parts[2].Matched);
+  TAssert.AssertEquals('Café com leite', H.Text);
+  TAssert.AssertFalse('nothing marked', SearchHighlightFromMarked('title', 'Café com leite', H));
+  TAssert.AssertEquals(0, Length(H.Parts));
+  TAssert.AssertFalse('empty marks', SearchHighlightFromMarked('title', 'a'#1#2'b', H));
+  TAssert.AssertTrue('an unclosed mark runs to the end', SearchHighlightFromMarked('t', 'a'#1'b', H));
+  TAssert.AssertEquals(2, Length(H.Parts));
+  TAssert.AssertEquals('b', H.Parts[1].Text);
+  TAssert.AssertTrue(SearchHighlightFromMarked('t', #1'a'#2#1'b'#2, H));
+  TAssert.AssertEquals('adjacent marks become one part', 1, Length(H.Parts));
+  TAssert.AssertEquals('ab', H.Parts[0].Text);
+end;
+
+procedure TCoreTests.Highlight_ToHtml_Escapes;
+var
+  H: TSearchHighlight;
+begin
+  TAssert.AssertTrue(SearchHighlightFromMarked('t', '<b>'#1'x&y'#2'</b> "q" ''s''', H));
+  TAssert.AssertEquals('&lt;b&gt;<mark>x&amp;y</mark>&lt;/b&gt; &quot;q&quot; &#39;s&#39;', H.ToHtml);
+  TAssert.AssertEquals('&lt;b&gt;<em class="m">x&amp;y</em>&lt;/b&gt; &quot;q&quot; &#39;s&#39;',
+    H.ToHtml('<em class="m">', '</em>'));
+  TAssert.AssertEquals('a&amp;b', SearchHtmlEscape('a&b'));
+end;
+
+procedure TCoreTests.Highlight_QueryChecksFieldNames;
+var
+  Q: ISearchQuery;
+begin
+  Q := NewQuery('x').Highlight(['title', 'body']);
+  TAssert.AssertEquals(2, Length(Q.Request.Highlight));
+  TAssert.AssertEquals('body', Q.Request.Highlight[1]);
+  try
+    NewQuery('x').Highlight(['bad name']);
+    TAssert.Fail('An invalid field name must raise');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TCoreTests.Synonym_Builders;
+var
+  S: TSearchSynonym;
+begin
+  S := TSearchSynonym.Equivalent(['tv', 'televisão']);
+  TAssert.AssertFalse(S.IsOneWay);
+  TAssert.AssertEquals(2, Length(S.Words));
+  S := TSearchSynonym.OneWay('geladeira', ['refrigerador']);
+  TAssert.AssertTrue(S.IsOneWay);
+  TAssert.AssertEquals('geladeira', S.Root);
+  TAssert.AssertEquals('refrigerador', S.Words[0]);
+  SearchCheckSynonyms([TSearchSynonym.Equivalent(['café preto', 'expresso']), S]);
+  SearchCheckSynonyms([]);
+end;
+
+procedure TCoreTests.Synonym_Refusals;
+
+  procedure Refused(const AGroup: TSearchSynonym; const AWhy: string);
+  begin
+    try
+      SearchCheckSynonyms([AGroup]);
+      TAssert.Fail('Accepted: ' + AWhy);
+    except
+      on ESearchArgumentError do
+        TAssert.AssertTrue(True);
+    end;
+  end;
+
+begin
+  Refused(TSearchSynonym.Equivalent(['tv']), 'one word');
+  Refused(TSearchSynonym.Equivalent(['tv', ' ']), 'a blank word');
+  Refused(TSearchSynonym.Equivalent(['tv', 'tv ']), 'blanks around a word');
+  Refused(TSearchSynonym.OneWay('x', []), 'a root without words');
+  Refused(TSearchSynonym.OneWay(' x', ['y']), 'blanks around the root');
+end;
+
+procedure TCoreTests.Schema_Renamed;
+var
+  S: ISearchSchema;
+  LField: TSearchField;
+begin
+  S := SearchSchemaRenamed(TSearchSchema.New('a').Text('t').Keyword('k', [sfFilter, sfFacet])
+    .Int('n', [sfSort]).Stored('s').WithMaxHits(7), 'b');
+  TAssert.AssertEquals('b', S.Name);
+  TAssert.AssertEquals(7, S.MaxHits);
+  TAssert.AssertEquals(4, S.FieldCount);
+  TAssert.AssertTrue(S.FindField('k', LField));
+  TAssert.AssertTrue(LField.IsFacet);
+  TAssert.AssertTrue(S.FindField('s', LField));
+  TAssert.AssertTrue(LField.Kind = skStored);
 end;
 
 initialization

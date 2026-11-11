@@ -18,6 +18,12 @@ as "finding N"); these still show, and each has a rule that avoids it.
 | Sort keys | any number | at most 3 (finding 50) | a fourth is Typesense's 400, `ESearchRequestError` |
 | Changing a field's kind | in place | refused by the library (`ESearchSchemaError`), as on the mock | drop and rebuild the index |
 | Facet statistics, `EXISTS`, `IS NULL` | yes | no | native access, Meilisearch only |
+| Highlight of a field that isn't Text | highlighted | refused (`ESearchRequestError`), as on the mock | highlight Text fields only |
+| What a highlight marks | its own matching (prefix part, typos) (finding 64) | the same rules, its own typos | read `Parts`/`ToHtml`, never assume whole words |
+| Where an index lives | an index (finding 57) | an alias to `name@<n>` since 0.2.0 (findings 59, 70) | let `ReplaceIndex` and `DropIndex` manage them |
+| `ReplaceIndex` onto a 0.1.0 index | atomic | a few ms of `ESearchIndexNotFound` (finding 60) | once per index; afterwards atomic |
+| Synonyms | the index's setting (finding 66) | a global set named like the collection (findings 67, 68) | set them only through `SetSynonyms` |
+| Typo, ranking, stop words, curation | settings (`SetTypoTolerance`...) | curation sets (`SetCuration`), typos per query (`Raw`) | native access |
 
 What the library makes the same, so you don't have to think about it: the schema (searched,
 filtered, sorted and faceted fields, findings 8, 18, 20, 32, 35); ids (the common set, findings

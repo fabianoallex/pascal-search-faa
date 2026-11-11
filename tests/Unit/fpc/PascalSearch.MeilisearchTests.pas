@@ -98,6 +98,16 @@ type
     procedure GetMany_OrderAsked;
     procedure DropIndex_Missing_NoError;
     procedure Send_NativeAccess;
+
+    procedure ReplaceIndex_ExistingTarget_SwapsAndDrops;
+    procedure ReplaceIndex_MissingTarget_Renames;
+    procedure ReplaceIndex_MissingSource_NothingSent;
+    procedure ListIds_Pages;
+    procedure SynonymsJson_Merged;
+    procedure SetSynonyms_PutsSettingAndWaits;
+    procedure Search_Highlight;
+    procedure NativeSettings_Sent;
+    procedure MaxHits_CacheExpires;
   end;
 
 implementation
@@ -641,6 +651,195 @@ begin
       TAssert.AssertEquals('bad', E.EngineMessage);
   end;
   TAssert.AssertEquals('[]', FFake.Request(1).Body);
+end;
+
+procedure TMeilisearchTests.ReplaceIndex_ExistingTarget_SwapsAndDrops;
+begin
+  IndexFound;
+  IndexFound;
+  Accepted(5);
+  Task(5, 'succeeded');
+  Accepted(6);
+  Task(6, 'succeeded');
+  FEngine.ReplaceIndex('products', 'products_new');
+  TAssert.AssertEquals('GET /indexes/products_new', Req(0));
+  TAssert.AssertEquals('GET /indexes/products', Req(1));
+  TAssert.AssertEquals('POST /swap-indexes', Req(2));
+  TAssert.AssertEquals('[{"indexes":["products","products_new"]}]', FFake.Request(2).Body);
+  TAssert.AssertEquals('GET /tasks/5', Req(3));
+  TAssert.AssertEquals('the source now holds the old documents', 'DELETE /indexes/products_new', Req(4));
+  TAssert.AssertEquals('GET /tasks/6', Req(5));
+  TAssert.AssertEquals(6, FFake.RequestCount);
+end;
+
+procedure TMeilisearchTests.ReplaceIndex_MissingTarget_Renames;
+begin
+  IndexFound;
+  IndexMissing;
+  Accepted(5);
+  Task(5, 'succeeded');
+  FEngine.ReplaceIndex('products', 'products_new');
+  TAssert.AssertEquals('POST /swap-indexes', Req(2));
+  TAssert.AssertEquals('[{"indexes":["products_new","products"],"rename":true}]', FFake.Request(2).Body);
+  TAssert.AssertEquals(4, FFake.RequestCount);
+end;
+
+procedure TMeilisearchTests.ReplaceIndex_MissingSource_NothingSent;
+begin
+  IndexMissing;
+  try
+    FEngine.ReplaceIndex('products', 'products_new');
+    TAssert.Fail('A missing source must raise');
+  except
+    on E: ESearchIndexNotFound do
+      TAssert.AssertTrue(E.Message, Pos('products_new', E.Message) > 0);
+  end;
+  TAssert.AssertEquals(1, FFake.RequestCount);
+  try
+    FEngine.ReplaceIndex('products', 'products');
+    TAssert.Fail('The same name twice must raise');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TMeilisearchTests.ListIds_Pages;
+var
+  LPage: string;
+  LIds: TArray<string>;
+  I: Integer;
+begin
+  LPage := '';
+  for I := 0 to 999 do
+  begin
+    if I > 0 then
+      LPage := LPage + ',';
+    LPage := LPage + '{"id":"d' + IntToStr(I) + '"}';
+  end;
+  Ok('{"results":[' + LPage + '],"offset":0,"limit":1000,"total":1002}');
+  Ok('{"results":[{"id":"x"},{"id":7}],"offset":1000,"limit":1000,"total":1002}');
+  LIds := FEngine.Index('products').ListIds;
+  TAssert.AssertEquals(1002, Length(LIds));
+  TAssert.AssertEquals('d0', LIds[0]);
+  TAssert.AssertEquals('a number id as its text', '7', LIds[1001]);
+  TAssert.AssertEquals('POST /indexes/products/documents/fetch', Req(0));
+  TAssert.AssertEquals('{"offset":0,"limit":1000,"fields":["id"]}', FFake.Request(0).Body);
+  TAssert.AssertEquals('{"offset":1000,"limit":1000,"fields":["id"]}', FFake.Request(1).Body);
+  Ok('{"results":[],"offset":0,"limit":1000,"total":0}');
+  TAssert.AssertEquals(0, Length(FEngine.Index('products').ListIds(F.Eq('category', 'Bar "Zé"'))));
+  TAssert.AssertEquals('{"offset":0,"limit":1000,"fields":["id"],"filter":"category = \"Bar \\\"Zé\\\"\""}',
+    FFake.Request(2).Body);
+end;
+
+procedure TMeilisearchTests.SynonymsJson_Merged;
+begin
+  TAssert.AssertEquals('{"tv":["televisão"],"televisão":["tv"]}',
+    MeilisearchSynonymsJson([TSearchSynonym.Equivalent(['tv', 'televisão'])]));
+  TAssert.AssertEquals('{"a":["b","c"],"b":["a"],"x y":["z"]}',
+    MeilisearchSynonymsJson([TSearchSynonym.Equivalent(['a', 'b']), TSearchSynonym.OneWay('a', ['c', 'b']),
+      TSearchSynonym.OneWay('x y', ['z'])]));
+  TAssert.AssertEquals('{}', MeilisearchSynonymsJson([]));
+end;
+
+procedure TMeilisearchTests.SetSynonyms_PutsSettingAndWaits;
+begin
+  IndexFound;
+  Accepted(3);
+  Task(3, 'succeeded');
+  FEngine.Index('products').SetSynonyms([TSearchSynonym.OneWay('geladeira', ['refrigerador'])]);
+  TAssert.AssertEquals('GET /indexes/products', Req(0));
+  TAssert.AssertEquals('PUT /indexes/products/settings/synonyms', Req(1));
+  TAssert.AssertEquals('{"geladeira":["refrigerador"]}', FFake.Request(1).Body);
+  TAssert.AssertEquals('GET /tasks/3', Req(2));
+  try
+    FEngine.Index('products').SetSynonyms([TSearchSynonym.Equivalent(['so one'])]);
+    TAssert.Fail('A group of one word must raise');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertEquals('nothing sent', 3, FFake.RequestCount);
+  end;
+end;
+
+procedure TMeilisearchTests.Search_Highlight;
+var
+  R: ISearchResult;
+  H: TSearchHighlight;
+begin
+  Ok('{"hits":[{"id":"1","title":"Café com leite","_formatted":{"id":"1","title":"\u0001Café\u0002 com leite",' +
+    '"body":"nada"}}],"totalHits":1,"page":1,"hitsPerPage":20}');
+  R := FEngine.Index('products').Search('café').Fields(['title']).Highlight(['title', 'body']).Execute;
+  TAssert.AssertEquals('{"q":"café","matchingStrategy":"all","page":1,"hitsPerPage":20,' +
+    '"attributesToHighlight":["title","body"],"highlightPreTag":"\u0001","highlightPostTag":"\u0002",' +
+    '"attributesToRetrieve":["title","id"]}', FFake.Request(0).Body);
+  TAssert.AssertTrue('_formatted is not part of the document', R.Hit(0).Document.Find('_formatted') = nil);
+  TAssert.AssertEquals('Café com leite', R.Hit(0).Document.Find('title').AsString);
+  TAssert.AssertTrue(R.Hit(0).FindHighlight('title', H));
+  TAssert.AssertEquals('<mark>Café</mark> com leite', H.ToHtml);
+  TAssert.AssertFalse('a value without marks', R.Hit(0).FindHighlight('body', H));
+end;
+
+procedure TMeilisearchTests.NativeSettings_Sent;
+var
+  LTypos: TMeilisearchTypoTolerance;
+begin
+  LTypos := TMeilisearchTypoTolerance.Standard;
+  TAssert.AssertTrue(LTypos.Enabled);
+  LTypos.OneTypo := 4;
+  SetLength(LTypos.DisableOnWords, 1);
+  LTypos.DisableOnWords[0] := 'tv';
+  IndexFound;
+  Accepted(1);
+  Task(1, 'succeeded');
+  FEngine.SetTypoTolerance('products', LTypos);
+  TAssert.AssertEquals('PATCH /indexes/products/settings/typo-tolerance', Req(1));
+  TAssert.AssertEquals('{"enabled":true,"minWordSizeForTypos":{"oneTypo":4,"twoTypos":9},' +
+    '"disableOnWords":["tv"],"disableOnAttributes":[]}', FFake.Request(1).Body);
+  IndexFound;
+  Accepted(2);
+  Task(2, 'succeeded');
+  FEngine.SetRankingRules('products', ['words', 'typo', 'price:asc']);
+  TAssert.AssertEquals('PUT /indexes/products/settings/ranking-rules', Req(4));
+  TAssert.AssertEquals('["words","typo","price:asc"]', FFake.Request(4).Body);
+  IndexFound;
+  Accepted(3);
+  Task(3, 'failed', '{"code":"invalid_settings_stop_words","type":"invalid_request","message":"bad"}');
+  try
+    FEngine.SetStopWords('products', ['de', 'a']);
+    TAssert.Fail('A failed settings task must raise');
+  except
+    on E: ESearchRequestError do
+      TAssert.AssertEquals('invalid_settings_stop_words', E.EngineCode);
+  end;
+  TAssert.AssertEquals('PUT /indexes/products/settings/stop-words', Req(7));
+  TAssert.AssertEquals('["de","a"]', FFake.Request(7).Body);
+  IndexMissing;
+  try
+    FEngine.SetStopWords('products', []);
+    TAssert.Fail('A missing index must raise (a settings call would create it)');
+  except
+    on ESearchIndexNotFound do
+      TAssert.AssertEquals(10, FFake.RequestCount);
+  end;
+end;
+
+procedure TMeilisearchTests.MaxHits_CacheExpires;
+begin
+  Ok('{"maxTotalHits":50}');
+  Ok('{"hits":[],"totalHits":0}');
+  FEngine.Index('products').Search('').Page(2, 10).Execute;
+  Ok('{"hits":[],"totalHits":0}');
+  FEngine.Index('products').Search('').Page(2, 10).Execute;
+  TAssert.AssertEquals('read once', 3, FFake.RequestCount);
+  FTime.Sleep(MEILISEARCH_DEFAULT_CACHE_MS);
+  Ok('{"maxTotalHits":5}');
+  try
+    FEngine.Index('products').Search('').Page(2, 10).Execute;
+    TAssert.Fail('MaxHits read again (5): page 2 is past it');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertEquals('GET /indexes/products/settings/pagination', Req(3));
+  end;
 end;
 
 initialization

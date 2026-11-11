@@ -2,14 +2,17 @@
 
 A search-engine contract for **Delphi and Lazarus/FPC** from one codebase: a declared schema,
 documents with string ids, batched upsert and delete, typed filters (never filter text), text
-search with sort, paging and facets, and waiting until a write is searchable. Adapters per
+search with sort, paging, facets, highlight (escaped for HTML) and synonyms, waiting until a
+write is searchable, and rebuilding an index beside the live one. Adapters per
 engine (Meilisearch first, Typesense to validate the contract), an in-memory mock for tests,
 and a bridge that keeps an index in step with the database through pascal-db-faa's
 transactional outbox.
 
-**Status: 0.1.0.** The core, the mock, both adapters (Meilisearch, Typesense) and the outbox
-bridge are done; the same contract suite passes on the mock and on both engines. Versions stay
-0.x while the contract may still change. **Guides: [`docs/README.md`](docs/README.md).**
+**Status: 0.2.0.** The core, the mock, both adapters (Meilisearch, Typesense) and the outbox
+bridge are done; the same contract suite passes on the mock and on both engines. 0.2.0 added
+`ReplaceIndex`, `ListIds`, highlight, synonyms, typed engine settings and the bridge giving up
+at once on a caller's bug. Versions stay 0.x while the contract may still change. **Guides:
+[`docs/README.md`](docs/README.md).**
 
 Part of the `*-faa` family (MIT, Delphi 12 and FPC 3.2.2, `{$MODE DELPHI}`). Not an adapter of
 pascal-db-faa: a search engine is HTTP + JSON with asynchronous writes. A database's own
@@ -50,6 +53,19 @@ begin
 end.
 ```
 
+Highlight comes in parts, escaped when written as HTML (neither engine escapes it); synonyms
+are set per index; a rebuilt index takes the live one's place in one call:
+
+```pascal
+  R := Products.Search('café').Highlight(['title']).Execute;
+  if R.Hit(0).FindHighlight('title', H) then
+    Html := H.ToHtml('<mark>', '</mark>');        // the value escaped, the match marked
+
+  Products.SetSynonyms([TSearchSynonym.Equivalent(['tv', 'televisão'])]);
+
+  Engine.ReplaceIndex('products', 'products_new'); // after filling products_new
+```
+
 ## Meilisearch
 
 ```pascal
@@ -69,8 +85,9 @@ begin
 - Writes are asynchronous on Meilisearch: call `WaitFor` before searching what you wrote. A
   write whose request got no answer raises `ESearchUnavailable` and is not repeated; Upsert and
   Delete are idempotent, so send them again.
-- `(Engine as IMeilisearchEngine).Send(Method, Path, Body)` reaches any endpoint (synonyms,
-  typo tolerance...) with the key and the error mapping; `WaitForTask` waits for its tasks.
+- `(Engine as IMeilisearchEngine).Send(Method, Path, Body)` reaches any endpoint with the key
+  and the error mapping; `WaitForTask` waits for its tasks. Typed: `SetTypoTolerance`,
+  `SetRankingRules`, `SetStopWords`.
 - Linux: the package `libssl3` (Debian 12; no `libssl-dev` needed), and `ca-certificates` for a
   server with a public certificate.
 
@@ -87,11 +104,12 @@ uses PascalSearch.Typesense;
 - The same TLS options as above. Writes are applied before the answer: `WaitFor` returns at
   once, raising the documents an import refused (the others are kept).
 - `EnsureIndex` keeps the schema in the collection's metadata; the adapter checks filter, sort
-  and facet fields against it, and searches the `Text` fields.
+  and facet fields against it, and searches the `Text` fields. Since 0.2.0 an index is an alias
+  to a collection of its own (`products@<n>`), so `ReplaceIndex` can swap it.
 - A filter value can't hold a backtick on Typesense (nothing escapes it): such a value raises
   `ESearchArgumentError`. At most 3 sort keys.
-- `(Engine as ITypesenseEngine).Send(Method, Path, Body)` reaches any endpoint (synonym sets,
-  curation...).
+- `(Engine as ITypesenseEngine).Send(Method, Path, Body)` reaches any endpoint; typed:
+  `SetCuration` (pin and hide documents for a query).
 
 ## Keeping an index in step with the database
 
@@ -108,7 +126,8 @@ uses PascalDb.Outbox, PascalSearch.Outbox;
 ```
 
 The handler loads the ids' current rows (the loader is yours), upserts those found, deletes the
-others and waits for both writes; any failure is retried by the outbox. Guide:
+others and waits for both writes; a failure is retried by the outbox, and a caller's bug (a bad
+id, a request the engine refuses) is dead at once. Guide:
 [`docs/outbox.md`](docs/outbox.md); sample: [`samples/01-outbox`](samples/01-outbox/SearchOutbox.dpr).
 
 ## Contents
@@ -129,7 +148,7 @@ others and waits for both writes; any failure is retried by the outbox. Guide:
 | `PascalSearch.Typesense` | the Typesense adapter (`adapters/typesense`, own package) |
 | `PascalSearch.Outbox` | the outbox bridge (`bridges/outbox`, own package; needs pascal-db-faa) |
 
-Docs: the guides in [`docs/README.md`](docs/README.md); [`design.md`](docs/design.md) (decisions S1-S24; sections 8-11 what the
+Docs: the guides in [`docs/README.md`](docs/README.md); [`design.md`](docs/design.md) (decisions S1-S31; sections 8-12 what the
 implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 (what Meilisearch 1.56.2 and Typesense 30.2 did when probed), [`gotchas.md`](docs/gotchas.md).
 
@@ -138,7 +157,7 @@ implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0+ (1.31.0+ with an
 adapter) and [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa)
 0.7.0+, each as the application's own submodule; the outbox bridge also
-[pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.18.0+. Delphi: add `src/` of
+[pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.21.0+. Delphi: add `src/` of
 this library and of both to the search path, plus `adapters/meilisearch` or
 `adapters/typesense` for an engine, `bridges/outbox` and pascal-db-faa's `src/` for the bridge.
 Lazarus: `packages/pascal_search_faa.lpk`, plus `pascal_search_faa_meilisearch.lpk`,

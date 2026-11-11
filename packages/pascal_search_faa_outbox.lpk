@@ -15,7 +15,7 @@
     </CompilerOptions>
     <Description Value="pascal-search-faa's outbox bridge: a pascal-db-faa outbox handler that keeps a search index in step with the database."/>
     <License Value="MIT"/>
-    <Version Minor="1"/>
+    <Version Minor="2"/>
     <Files>
       <Item>
         <Filename Value="..\bridges\outbox\PascalSearch.Outbox.pas"/>
@@ -25,11 +25,11 @@
     <RequiredPkgs>
       <Item>
         <PackageName Value="pascal_search_faa"/>
-        <MinVersion Minor="1" Valid="True"/>
+        <MinVersion Minor="2" Valid="True"/>
       </Item>
       <Item>
         <PackageName Value="pascal_db_faa"/>
-        <MinVersion Minor="18" Valid="True"/>
+        <MinVersion Minor="21" Valid="True"/>
       </Item>
       <Item>
         <PackageName Value="pascaljsonmapper_pkg"/>

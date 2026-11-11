@@ -5,7 +5,9 @@ proposed defaults: milliseconds, words-only text, every word required, the commo
 Core and mock implemented the same day (section 8 lists what the implementation settled). The
 Meilisearch adapter followed on 2026-11-10, on pascal-common-faa 1.31.0's HTTP client (section 9),
 and the Typesense adapter the same day (section 10): the contract suite passed on it unchanged.
-The outbox bridge's decisions were accepted on 2026-11-10, as proposed (section 11).
+The outbox bridge's decisions were accepted on 2026-11-10, as proposed (section 11). Section 12
+(0.2.0: replacing an index, listing ids, highlight, synonyms, giving up) was accepted on
+2026-11-11.
 Every decision is numbered (S1...).
 "Finding N" points to [`engine-findings.md`](engine-findings.md) (Meilisearch 1.56.2 and
 Typesense 30.2, measured through FPC 3.2.2 on Linux).
@@ -16,10 +18,11 @@ A contract for external search engines, one adapter per engine, and an in-memory
 
 - **In the contract**: an index with a declared schema; documents with a string id; upsert and
   delete in batches; delete by filter; get by ids; search with text, a typed filter, sort,
-  paging, facets and the fields to return; waiting until a write is searchable.
-- **Out of it, through the adapter's native access**: synonyms, typo settings, ranking rules,
-  stop words, highlight, scores, `EXISTS`/`IS NULL`, negated groups, prefix filters, geo,
-  vectors, keys management.
+  paging, facets and the fields to return; waiting until a write is searchable. Since 0.2.0
+  (section 12): replacing an index with another, listing every id, highlight, synonyms.
+- **Out of it, through the adapter's native access**: typo settings, ranking rules, stop words,
+  curation (typed helpers since 0.2.0, S29), cropping, scores, `EXISTS`/`IS NULL`, negated
+  groups, prefix filters, geo, vectors, keys management.
 - **Not here**: the database's own full-text search (pascal-db-faa's `PascalDb.FullText`).
 
 ## 2. Packages and dependencies
@@ -29,7 +32,7 @@ A contract for external search engines, one adapter per engine, and an in-memory
 | `pascal_search_faa` (core, `src/`) | `PascalSearch.Version`, `.Interfaces`, `.Schema`, `.Documents`, `.Filters`, `.Errors`, `.Values`, `.Query`, `.Mock`, `.EngineJson` | pascal-common-faa 1.20.0+ (`PcFoldForSearch`, `PcLowerCase`), pascal-jsonmapper-faa 0.7.0+ (JSON DOM, DTO mapping) |
 | `pascal_search_faa_meilisearch` (`adapters/meilisearch/`) | `PascalSearch.Meilisearch` | core, pascal-common-faa 1.31.0+ (`PascalCommon.Http`, `TSleep`/`TTicker`) |
 | `pascal_search_faa_typesense` (`adapters/typesense/`) | `PascalSearch.Typesense` | core, pascal-common-faa 1.31.0+ |
-| `pascal_search_faa_outbox` (`bridges/outbox/`) | `PascalSearch.Outbox` | core, pascal-db-faa 0.18.0+ (`PascalDb.Outbox`) |
+| `pascal_search_faa_outbox` (`bridges/outbox/`) | `PascalSearch.Outbox` | core, pascal-db-faa 0.21.0+ (`PascalDb.Outbox`; 0.18.0+ until 0.1.0) |
 
 **S1. JSON through pascal-jsonmapper-faa.** Its DOM (`TJsonValue`) gives the same text on both
 compilers, keeps number text (an Int64 id survives) and always writes `.` as decimal separator
@@ -479,3 +482,101 @@ Three facts of pascal-db-faa 0.20.1 shaped it:
   `FailNextWrite` and `Unavailable` that errors are raised). The whole path (`Enqueue` in a
   transaction, the relay, the local sink, the handler, a real engine) runs in the integration
   suite on SQLite.
+
+## 12. 0.2.0: replacing an index, listing ids, highlight, synonyms, giving up
+
+Accepted 2026-11-11 (the user's choices on the four open points: aliases on Typesense,
+synonyms in the contract, highlight in parts, Argument and Request errors dead at once). Probed
+first: findings 57-70.
+
+**S25. `ISearchEngine.ReplaceIndex(ATarget, ASource)`.** When it returns, `ATarget` serves what
+`ASource` held (documents, schema, synonyms, every engine setting), the name `ASource` is free,
+and what `ATarget` held is gone. `ATarget` may not exist (then it is a rename). A missing
+`ASource` raises `ESearchIndexNotFound`; the same name twice `ESearchArgumentError`. This closes
+the gap of section 11: a reindex fills a new index and replaces the live one with it, with no
+empty index and no orphan documents.
+- **Meilisearch**: an existing target is swapped with the source (`/swap-indexes`, one task,
+  atomic, finding 57) and the source, now holding the old documents, dropped; a missing target
+  is renamed into (`"rename": true`, finding 58). Each task waited.
+- **Typesense has no rename and no swap, only aliases** (findings 59, 60). From 0.2.0
+  `EnsureIndex('products')` creates a collection `products@<n>` (`<n>`: Unix milliseconds of
+  `TClock`, with `_2`, `_3`... on a clash; `@` never appears in an index name, S4, so no
+  collection of the library is ever named like an index) and the alias `products` pointing to
+  it. Everything else goes through the alias (finding 70). `ReplaceIndex` points the target's
+  alias to the source's collection, deletes the source's alias, then drops the target's old
+  collection (and its synonym set, S28). A collection made by 0.1.0 (named like the index, no
+  alias) keeps working; replacing it drops it and creates the alias, so for a few milliseconds
+  a search answers `ESearchIndexNotFound` (the guide says so). A source made by 0.1.0 can't be
+  moved under another name: `ESearchNotSupported` (make the new index with 0.2.0).
+  `DropIndex` drops the collection behind the alias, then the alias, then the synonym set.
+- **Two processes ensuring a new index at the same moment** on Typesense may leave an empty
+  collection behind (each creates its own, the alias points to the last): documented, harmless.
+- **Caches expire.** What an adapter reads about an index (Typesense: the schema; Meilisearch:
+  `MaxHits`) is kept `CacheMs` (config; 0: 60 s), measured with `TTicker`, so another process's
+  `ReplaceIndex` or `EnsureIndex` is seen within that time. `ReplaceIndex`, `EnsureIndex` and
+  `DropIndex` update the engine object's own cache at once.
+- **The mock** moves the source's data under the target's name.
+- **Writes meanwhile**: the outbox keeps writing the live index while the new one fills. The
+  guide gives two ways: stop the sink while rebuilding (the events wait in the outbox and are
+  applied to the new index after the replace), or sync again, after the replace, the ids
+  changed since the rebuild started.
+
+**S26. `ISearchIndex.ListIds(AFilter = nil): TArray<string>`**: every id of the index, or of the
+documents matching `AFilter`, not capped by `MaxHits`, in no particular order. Meilisearch pages
+`POST /documents/fetch` (`fields: ["id"]`, 1000 per page; writes during the listing may make it
+skip or repeat an id, finding 61); Typesense one `export` with `include_fields=id`; the mock its
+insertion order. The filter is checked like a search's (an undeclared field is
+`ESearchRequestError`). One string per document is held in memory: the guide says so. With it a
+reindex in place can delete the ids the database no longer has.
+
+**S27. Highlight in parts, escaped by the caller's choice of rendering.** Neither engine escapes
+HTML (finding 64), so the library never hands out the engine's tagged text:
+- `.Highlight(['title', 'body'])` on the query; Text fields only (the mock and Typesense refuse
+  another with `ESearchRequestError`; Meilisearch would highlight any field and isn't checked,
+  like facets in finding 45).
+- The adapters ask the engine for two ASCII control characters (`#1`, `#2`) as the tags
+  (finding 71; non-ASCII markers would depend on FPC's string code page), with the whole value
+  (Meilisearch `_formatted`; Typesense `highlight_full_fields`, `value`), and cut the value into
+  `TSearchHighlightPart`s (`Text`, `Matched`). `ISearchHit.FindHighlight(Field, out H)` is
+  `False` for a field without a match, an empty text, or a field not asked. `H.Text` is the
+  plain value; `H.ToHtml('<mark>', '</mark>')` escapes `& < > " '` in every part and wraps the
+  matched ones. A stored value holding `#1` or `#2` shows them as marks (documented).
+- What is marked is the engine's: a prefix marks the matched part, a typo or an accent the whole
+  word (finding 64). The mock marks whole words and the prefix of the last word, no typos.
+- Cropping/snippets differ (finding 65): native (`Raw`).
+- Meilisearch's `_formatted` is taken out of the hit's `Document`.
+
+**S28. Synonyms in the contract: `ISearchIndex.SetSynonyms(AGroups)`**, replacing every group
+(an empty array clears them), applied at query time (no reindex), returned once applied
+(Meilisearch's task waited). A group is `TSearchSynonym.Equivalent(['tv', 'televisão'])` (every
+word finds the others) or `TSearchSynonym.OneWay('geladeira', ['refrigerador'])` (the root finds
+the words, not the reverse); words may be several (`'café preto'`), case and accents don't
+matter (findings 66, 67). Checked at the call (`ESearchArgumentError`): no blank word, at least
+two words in an equivalent group, one in a one-way group.
+- Meilisearch: the `synonyms` setting, each word of an equivalent group a key to the others.
+- Typesense: a synonym set named like the index's collection (`products@<n>`), attached to it;
+  it moves with the collection on `ReplaceIndex`, and is deleted only after the collection
+  (finding 68: a set deleted while attached breaks every search). Sets the application attached
+  itself are kept.
+- The mock applies them: a query word, or a run of query words, equal to a key also matches
+  through each of its synonyms.
+- Synonyms and the native settings (S29) belong to the index: set them on the new index before
+  `ReplaceIndex`.
+
+**S29. Typed native helpers (S20's promise), per engine**, each returning once applied:
+`IMeilisearchEngine.SetTypoTolerance(Index, TMeilisearchTypoTolerance)`, `.SetRankingRules`,
+`.SetStopWords`; `ITypesenseEngine.SetCuration(Index, array of TTypesenseCuration)` (a curation
+set named like the collection, attached like the synonyms; deleting one in use is harmless,
+finding 68). Typesense's typo settings are search parameters (finding 69): `Raw`.
+
+**S30. The outbox bridge gives up at once on a caller's bug.** pascal-db-faa 0.21.0 adds
+`EOutboxGiveUp`: a handler raising it sends its delivery to `dead` at the first try (counted,
+reported to `OnError` like any failure). The bridge raises it for `ESearchArgumentError` and
+`ESearchRequestError` (S21: a bug in the caller; the same request would fail the same way),
+with the original class and message in its message. `ESearchWriteFailed`, `ESearchUnavailable`,
+`ESearchTimeout`, `ESearchAuthError` and `ESearchIndexNotFound` keep the retries (an
+`EnsureIndex` or a configuration fix makes them pass). The bridge's minimum becomes
+pascal-db-faa 0.21.0.
+
+**S31. Version 0.2.0**; pascal-common-faa 1.20.0 for the core and 1.31.0 for the adapters, as
+before.

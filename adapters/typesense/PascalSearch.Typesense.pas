@@ -15,14 +15,25 @@
 
    How the contract maps (docs/design.md; "finding N" is
    docs/engine-findings.md):
+   - An index is an alias to a collection (0.2.0, design S25): EnsureIndex
+     of a new index creates the collection "<name>@<Unix ms>" and the alias
+     <name>; every other call goes through the alias (finding 70).
+     ReplaceIndex points the target's alias to the source's collection,
+     deletes the source's alias and drops the target's old collection.
+     Typesense has no rename or swap (findings 59, 60). A collection made by
+     0.1.0 (named like the index, no alias) keeps working; replacing it
+     drops it first, so searches answer ESearchIndexNotFound for a few
+     milliseconds. DropIndex drops the collection, the alias and the
+     library's synonym and curation sets.
    - The schema is stored in the collection's metadata ("pascal_search": the
      fields with their kinds and flags, and MaxHits). Typesense filters on
      any indexed field and searches only the query_by fields it is told
      (findings 18, 20), so the adapter needs the declaration: it refuses a
      filter, sort or facet on a field not declared for it (ESearchRequestError,
      as the mock and Meilisearch do) and searches the Text fields in order.
-     The schema is read once per engine and index and kept; EnsureIndex and
-     DropIndex update it. A collection made by something else (no metadata)
+     The schema read from the server is kept CacheMs (60 s by default), so
+     another process's ReplaceIndex is seen; EnsureIndex, DropIndex and
+     ReplaceIndex update it. A collection made by something else (no metadata)
      is read from its fields: strings as Text, the rest by type, each indexed
      field filterable, facets and sorts as declared there.
    - Fields: Text and Keyword are "string", Keywords "string[]", Num
@@ -48,13 +59,24 @@
      a value holding a backtick is refused (ESearchArgumentError), because
      nothing escapes it; AnyOf/NoneOf as ||/&& of single comparisons, never
      as a [...] list, where a backslash changes the parse (finding 22).
+   - Highlight: highlight_fields and highlight_full_fields with #1/#2 as
+     the tags (findings 63, 71), each field's "value" cut into parts; Text
+     fields only (ESearchRequestError).
+   - ListIds is one export with include_fields=id (finding 61).
+   - SetSynonyms writes a synonym set named like the index's collection and
+     attaches it (Typesense 30 keeps synonyms in global sets, finding 67);
+     it moves with the collection on ReplaceIndex and is deleted only after
+     the collection: a set deleted while attached breaks every search
+     (finding 68).
    - Errors: 401/403 ESearchAuthError, 404 "Collection not found" (or "No
      collection with name ...", DELETE's) ESearchIndexNotFound, 5xx and no answer ESearchUnavailable, any other
      4xx ESearchRequestError, with Typesense's message in EngineMessage
      (Typesense sends no code, finding 37).
 
-   Native access (S20): ITypesenseEngine.Send for any endpoint, with the key
-   and the error mapping applied. *)
+   Native access (S20, S29): ITypesenseEngine.Send for any endpoint, with
+   the key and the error mapping applied, and SetCuration (a curation set
+   named like the collection, attached like the synonyms). Typesense's typo
+   settings are search parameters (finding 69): Raw. *)
 
 interface
 
@@ -81,16 +103,42 @@ type
     /// Zeroed: https verified against the system store and the host name.
     /// Http.Tls.SkipServerVerification is INSECURE: for a lab only.
     Http: TPcHttpOptions;
+    /// How long an index's schema read from the server is kept.
+    /// 0 = TYPESENSE_DEFAULT_CACHE_MS.
+    CacheMs: Integer;
     class function Create(const AUrl: string; const AApiKey: string = ''): TTypesenseConfig; static;
+  end;
+
+  /// A document a curation puts at a position (1 = first).
+  TTypesenseCuratedHit = record
+    Id: string;
+    Position: Integer;
+  end;
+
+  /// One item of a curation set (finding 69): for the query AQuery
+  /// ('exact' match, or 'contains'), the documents to put first, in order,
+  /// and those to hide.
+  TTypesenseCuration = record
+    Id: string;
+    Query: string;
+    Match: string;
+    Includes: TArray<TTypesenseCuratedHit>;
+    Excludes: TArray<string>;
+    /// AIncludeIds at positions 1, 2...; Match 'exact'.
+    class function Create(const AId, AQuery: string; const AIncludeIds: array of string;
+      const AExcludeIds: array of string): TTypesenseCuration; static;
   end;
 
   ITypesenseEngine = interface(ISearchEngine)
     ['{3D8E1B47-6C2A-4F95-B0E3-7A5C9D2F1E64}']
     function Config: TTypesenseConfig;
-    /// One request to APath ('/collections/x/synonyms'), with the key;
-    /// returns the body of a 2xx answer, raises as the contract does for
-    /// anything else. APath goes as written: encode its parts.
+    /// One request to APath ('/synonym_sets/x'), with the key; returns the
+    /// body of a 2xx answer, raises as the contract does for anything else.
+    /// APath goes as written: encode its parts.
     function Send(const AMethod, APath: string; const ABody: string = ''): string;
+    /// Replaces the index's curation (a curation set named like its
+    /// collection, attached to it); an empty array clears it.
+    procedure SetCuration(const AIndexName: string; const AItems: array of TTypesenseCuration);
   end;
 
   TTypesenseEngine = class(TInterfacedObject, ISearchEngine, ITypesenseEngine)
@@ -101,6 +149,7 @@ type
     FLock: TCriticalSection;
     FSchemaNames: TArray<string>;
     FSchemas: TArray<ISearchSchema>;
+    FSchemaAt: TArray<UInt64>;
     function Exchange(const AMethod, APath, ABody: string): TPcHttpResponse;
     procedure RaiseAnswer(const AMethod, APath: string; const AResponse: TPcHttpResponse);
     function Call(const AMethod, APath, ABody: string): string;
@@ -109,6 +158,9 @@ type
     procedure CacheSchema(const AName: string; const ASchema: ISearchSchema);
     procedure ForgetSchema(const AName: string);
     function SchemaOf(const AName: string): ISearchSchema;
+    function FindAlias(const AName: string): string;
+    procedure DeleteQuietly(const APath: string);
+    procedure PutSet(const AIndexName, AMember, AItemsJson: string);
   public
     /// Raises ESearchArgumentError for a URL that isn't http(s) or has a path.
     class function New(const AConfig: TTypesenseConfig): ITypesenseEngine; overload;
@@ -124,7 +176,18 @@ type
     function Index(const AName: string): ISearchIndex;
     function IndexExists(const AName: string): Boolean;
     procedure DropIndex(const AName: string);
+    procedure ReplaceIndex(const ATarget, ASource: string);
+    procedure SetCuration(const AIndexName: string; const AItems: array of TTypesenseCuration);
   end;
+
+const
+  /// TTypesenseConfig.CacheMs = 0.
+  TYPESENSE_DEFAULT_CACHE_MS = 60000;
+
+/// The synonym set for AGroups as PUT /synonym_sets takes it: an
+/// equivalent group as "synonyms", a one-way one with its "root"; ids g0,
+/// g1...
+function TypesenseSynonymSetJson(const AGroups: array of TSearchSynonym): string;
 
 /// AFilter in Typesense's syntax: strings in backticks (one holding a
 /// backtick raises ESearchArgumentError), numbers in plain decimal, instants
@@ -132,15 +195,17 @@ type
 /// single comparisons, Between as [low..high].
 function TypesenseFilterText(const AFilter: ISearchFilter): string;
 
-/// The collection for ASchema as POST /collections takes it: the name, the
-/// indexed fields and the library's metadata.
-function TypesenseCollectionJson(const ASchema: ISearchSchema): string;
+/// The collection for ASchema as POST /collections takes it: the name
+/// (ACollection, or the schema's), the indexed fields and the library's
+/// metadata.
+function TypesenseCollectionJson(const ASchema: ISearchSchema; const ACollection: string = ''): string;
 
 implementation
 
 uses
   PascalCommon.Version,
   PascalCommon.Utf8,
+  PascalCommon.SystemContext,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Values,
@@ -179,6 +244,8 @@ type
     function Get(const AId: string): ISearchHit;
     function GetMany(const AIds: array of string): ISearchHits;
     function Search(const AText: string): ISearchQuery;
+    function ListIds(const AFilter: ISearchFilter = nil): TArray<string>;
+    procedure SetSynonyms(const AGroups: array of TSearchSynonym);
     function ExecuteSearch(const ARequest: TSearchRequest): ISearchResult;
   end;
 
@@ -360,7 +427,7 @@ begin
   W.EndObject;
 end;
 
-function TypesenseCollectionJson(const ASchema: ISearchSchema): string;
+function TypesenseCollectionJson(const ASchema: ISearchSchema; const ACollection: string): string;
 var
   W: TJsonWriter;
   I: Integer;
@@ -369,7 +436,10 @@ begin
   try
     W.BeginObject;
     W.Name('name');
-    W.WriteString(ASchema.Name);
+    if ACollection <> '' then
+      W.WriteString(ACollection)
+    else
+      W.WriteString(ASchema.Name);
     W.Name('fields');
     W.BeginArray;
     for I := 0 to ASchema.FieldCount - 1 do
@@ -566,6 +636,138 @@ begin
   end;
 end;
 
+function AliasJson(const ACollection: string): string;
+var
+  W: TJsonWriter;
+begin
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    W.Name('collection_name');
+    W.WriteString(ACollection);
+    W.EndObject;
+    Result := W.ToString;
+  finally
+    W.Free;
+  end;
+end;
+
+function TypesenseSynonymSetJson(const AGroups: array of TSearchSynonym): string;
+var
+  W: TJsonWriter;
+  I: Integer;
+begin
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    W.Name('items');
+    W.BeginArray;
+    for I := 0 to High(AGroups) do
+    begin
+      W.BeginObject;
+      W.Name('id');
+      W.WriteString('g' + IntToStr(I));
+      if AGroups[I].IsOneWay then
+      begin
+        W.Name('root');
+        W.WriteString(AGroups[I].Root);
+      end;
+      SearchWriteStrings(W, 'synonyms', AGroups[I].Words);
+      W.EndObject;
+    end;
+    W.EndArray;
+    W.EndObject;
+    Result := W.ToString;
+  finally
+    W.Free;
+  end;
+end;
+
+function CurationSetJson(const AItems: array of TTypesenseCuration): string;
+var
+  W: TJsonWriter;
+  I, J: Integer;
+begin
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    W.Name('items');
+    W.BeginArray;
+    for I := 0 to High(AItems) do
+    begin
+      W.BeginObject;
+      W.Name('id');
+      W.WriteString(AItems[I].Id);
+      W.Name('rule');
+      W.BeginObject;
+      W.Name('query');
+      W.WriteString(AItems[I].Query);
+      W.Name('match');
+      if AItems[I].Match <> '' then
+        W.WriteString(AItems[I].Match)
+      else
+        W.WriteString('exact');
+      W.EndObject;
+      if Length(AItems[I].Includes) > 0 then
+      begin
+        W.Name('includes');
+        W.BeginArray;
+        for J := 0 to High(AItems[I].Includes) do
+        begin
+          W.BeginObject;
+          W.Name('id');
+          W.WriteString(AItems[I].Includes[J].Id);
+          W.Name('position');
+          W.WriteInt64(AItems[I].Includes[J].Position);
+          W.EndObject;
+        end;
+        W.EndArray;
+      end;
+      if Length(AItems[I].Excludes) > 0 then
+      begin
+        W.Name('excludes');
+        W.BeginArray;
+        for J := 0 to High(AItems[I].Excludes) do
+        begin
+          W.BeginObject;
+          W.Name('id');
+          W.WriteString(AItems[I].Excludes[J]);
+          W.EndObject;
+        end;
+        W.EndArray;
+      end;
+      W.EndObject;
+    end;
+    W.EndArray;
+    W.EndObject;
+    Result := W.ToString;
+  finally
+    W.Free;
+  end;
+end;
+
+{ TTypesenseCuration }
+
+class function TTypesenseCuration.Create(const AId, AQuery: string; const AIncludeIds: array of string;
+  const AExcludeIds: array of string): TTypesenseCuration;
+var
+  I: Integer;
+begin
+  Result := Default(TTypesenseCuration);
+  Result.Id := AId;
+  Result.Query := AQuery;
+  Result.Match := 'exact';
+  SetLength(Result.Includes, Length(AIncludeIds));
+  for I := 0 to High(AIncludeIds) do
+  begin
+    Result.Includes[I].Id := AIncludeIds[I];
+    Result.Includes[I].Position := I + 1;
+  end;
+  SetLength(Result.Excludes, Length(AExcludeIds));
+  for I := 0 to High(AExcludeIds) do
+    Result.Excludes[I] := AExcludeIds[I];
+end;
+
 { TTypesenseConfig }
 
 class function TTypesenseConfig.Create(const AUrl, AApiKey: string): TTypesenseConfig;
@@ -732,13 +934,16 @@ end;
 
 function TTypesenseEngine.CachedSchema(const AName: string): ISearchSchema;
 var
-  I: Integer;
+  I, LLimit: Integer;
 begin
   Result := nil;
+  LLimit := FConfig.CacheMs;
+  if LLimit <= 0 then
+    LLimit := TYPESENSE_DEFAULT_CACHE_MS;
   FLock.Enter;
   try
     for I := 0 to High(FSchemaNames) do
-      if FSchemaNames[I] = AName then
+      if (FSchemaNames[I] = AName) and (TTicker.ElapsedMs(FSchemaAt[I]) < UInt64(LLimit)) then
         Exit(FSchemas[I]);
   finally
     FLock.Leave;
@@ -755,13 +960,16 @@ begin
       if FSchemaNames[I] = AName then
       begin
         FSchemas[I] := ASchema;
+        FSchemaAt[I] := TTicker.NowMs;
         Exit;
       end;
     N := Length(FSchemaNames);
     SetLength(FSchemaNames, N + 1);
     SetLength(FSchemas, N + 1);
+    SetLength(FSchemaAt, N + 1);
     FSchemaNames[N] := AName;
     FSchemas[N] := ASchema;
+    FSchemaAt[N] := TTicker.NowMs;
   finally
     FLock.Leave;
   end;
@@ -780,9 +988,11 @@ begin
         begin
           FSchemaNames[J] := FSchemaNames[J + 1];
           FSchemas[J] := FSchemas[J + 1];
+          FSchemaAt[J] := FSchemaAt[J + 1];
         end;
         SetLength(FSchemaNames, Length(FSchemaNames) - 1);
         SetLength(FSchemas, Length(FSchemas) - 1);
+        SetLength(FSchemaAt, Length(FSchemaAt) - 1);
         Exit;
       end;
   finally
@@ -813,7 +1023,7 @@ end;
 
 function TTypesenseEngine.EnsureIndex(const ASchema: ISearchSchema): ISearchIndex;
 var
-  LText, LBody, LPath: string;
+  LText, LBody, LPath, LCollection, LStamp: string;
   LJson: TJsonValue;
   LOld: ISearchSchema;
   LOldField: TSearchField;
@@ -826,19 +1036,22 @@ begin
   LText := FindCollection(ASchema.Name);
   if LText = '' then
   begin
-    LBody := TypesenseCollectionJson(ASchema);
-    LResponse := Exchange('POST', '/collections', LBody);
-    if IsSuccess(LResponse.Status) then
+    // A new collection behind the alias (design S25); a name taken (409)
+    // gets a suffix.
+    LStamp := ASchema.Name + '@' + IntToStr(SearchInstantToMs(TClock.Now));
+    LCollection := LStamp;
+    for I := 2 to 10 do
     begin
-      CacheSchema(ASchema.Name, ASchema);
-      Exit(TTypesenseIndex.Create(Self, ASchema.Name));
+      LResponse := Exchange('POST', '/collections', TypesenseCollectionJson(ASchema, LCollection));
+      if LResponse.Status <> 409 then
+        Break;
+      LCollection := LStamp + '_' + IntToStr(I);
     end;
-    // 409: created meanwhile by someone else; bring it up to the schema.
-    if LResponse.Status <> 409 then
+    if not IsSuccess(LResponse.Status) then
       RaiseAnswer('POST', '/collections', LResponse);
-    LText := FindCollection(ASchema.Name);
-    if LText = '' then
-      RaiseAnswer('POST', '/collections', LResponse);
+    Call('PUT', '/aliases/' + Seg(ASchema.Name), AliasJson(LCollection));
+    CacheSchema(ASchema.Name, ASchema);
+    Exit(TTypesenseIndex.Create(Self, ASchema.Name));
   end;
   LJson := ParseBody(LText, 'GET ' + LPath);
   try
@@ -870,27 +1083,165 @@ begin
   Result := FindCollection(AName) <> '';
 end;
 
-procedure TTypesenseEngine.DropIndex(const AName: string);
+// The collection the alias AName points to; '' when there is no such alias.
+function TTypesenseEngine.FindAlias(const AName: string): string;
 var
   LPath: string;
   LResponse: TPcHttpResponse;
+  LJson: TJsonValue;
+begin
+  LPath := '/aliases/' + Seg(AName);
+  LResponse := Exchange('GET', LPath, '');
+  if LResponse.Status = 404 then
+    Exit('');
+  if not IsSuccess(LResponse.Status) then
+    RaiseAnswer('GET', LPath, LResponse);
+  LJson := ParseBody(LResponse.Body, 'GET ' + LPath);
+  try
+    Result := SearchJsonText(LJson, 'collection_name');
+  finally
+    LJson.Free;
+  end;
+end;
+
+// A DELETE for which 404 (already gone) is no error.
+procedure TTypesenseEngine.DeleteQuietly(const APath: string);
+var
+  LResponse: TPcHttpResponse;
+begin
+  LResponse := Exchange('DELETE', APath, '');
+  if (LResponse.Status <> 404) and not IsSuccess(LResponse.Status) then
+    RaiseAnswer('DELETE', APath, LResponse);
+end;
+
+// Writes the set AMember ('synonym_sets', 'curation_sets') named like the
+// index's collection, and attaches it, keeping the sets already attached.
+procedure TTypesenseEngine.PutSet(const AIndexName, AMember, AItemsJson: string);
+var
+  LText, LCollection: string;
+  LJson, LSets: TJsonValue;
+  LNames: TArray<string>;
+  W: TJsonWriter;
+  I: Integer;
+  LAttached: Boolean;
+begin
+  SearchCheckIndexName(AIndexName);
+  LText := FindCollection(AIndexName);
+  if LText = '' then
+    raise ESearchIndexNotFound.CreateEngine(Format('%s: collection "%s" not found; EnsureIndex it first.',
+      [ENGINE_NAME, AIndexName]), 404, '', COLLECTION_NOT_FOUND);
+  LJson := ParseBody(LText, 'GET /collections/' + AIndexName);
+  try
+    LCollection := SearchJsonText(LJson, 'name');
+    if LCollection = '' then
+      LCollection := AIndexName;
+    LNames := nil;
+    LAttached := False;
+    LSets := SearchJsonMember(LJson, AMember);
+    if (LSets <> nil) and (LSets.Kind = jkArray) then
+      for I := 0 to LSets.Count - 1 do
+        if LSets.Items[I].Kind = jkString then
+        begin
+          SetLength(LNames, Length(LNames) + 1);
+          LNames[High(LNames)] := LSets.Items[I].AsString;
+          if LNames[High(LNames)] = LCollection then
+            LAttached := True;
+        end;
+  finally
+    LJson.Free;
+  end;
+  Call('PUT', '/' + AMember + '/' + Seg(LCollection), AItemsJson);
+  if LAttached then
+    Exit;
+  SetLength(LNames, Length(LNames) + 1);
+  LNames[High(LNames)] := LCollection;
+  W := TJsonWriter.Create;
+  try
+    W.BeginObject;
+    SearchWriteStrings(W, AMember, LNames);
+    W.EndObject;
+    Call('PATCH', '/collections/' + Seg(AIndexName), W.ToString);
+  finally
+    W.Free;
+  end;
+end;
+
+procedure TTypesenseEngine.SetCuration(const AIndexName: string; const AItems: array of TTypesenseCuration);
+var
+  I: Integer;
+begin
+  for I := 0 to High(AItems) do
+    if (AItems[I].Id = '') or (AItems[I].Query = '') then
+      raise ESearchArgumentError.CreateFmt('SetCuration: item %d needs an id and a query.', [I]);
+  PutSet(AIndexName, 'curation_sets', CurationSetJson(AItems));
+end;
+
+procedure TTypesenseEngine.DropIndex(const AName: string);
+var
+  LCollection: string;
 begin
   SearchCheckIndexName(AName);
   ForgetSchema(AName);
-  LPath := '/collections/' + Seg(AName);
-  LResponse := Exchange('DELETE', LPath, '');
-  if LResponse.Status = 404 then
+  LCollection := FindAlias(AName);
+  if LCollection <> '' then
   begin
-    try
-      RaiseAnswer('DELETE', LPath, LResponse);
-    except
-      on ESearchIndexNotFound do
-        Exit;
-    end;
+    DeleteQuietly('/collections/' + Seg(LCollection));
+    DeleteQuietly('/aliases/' + Seg(AName));
+  end
+  else
+  begin
+    // A collection made by 0.1.0, named like the index.
+    LCollection := AName;
+    DeleteQuietly('/collections/' + Seg(AName));
   end;
-  if not IsSuccess(LResponse.Status) then
-    RaiseAnswer('DELETE', LPath, LResponse);
+  // The library's sets, only once their collection is gone (finding 68).
+  DeleteQuietly('/synonym_sets/' + Seg(LCollection));
+  DeleteQuietly('/curation_sets/' + Seg(LCollection));
 end;
+
+procedure TTypesenseEngine.ReplaceIndex(const ATarget, ASource: string);
+var
+  LSource, LOld: string;
+  LOldIsCollection: Boolean;
+begin
+  SearchCheckIndexName(ATarget);
+  SearchCheckIndexName(ASource);
+  if ATarget = ASource then
+    raise ESearchArgumentError.CreateFmt('ReplaceIndex: "%s" can''t replace itself.', [ATarget]);
+  LSource := FindAlias(ASource);
+  if LSource = '' then
+  begin
+    if FindCollection(ASource) <> '' then
+      raise ESearchNotSupported.CreateFmt('%s: index "%s" is a collection made before 0.2.0, without an ' +
+        'alias; it can''t move under another name. Ensure the new index with 0.2.0.', [ENGINE_NAME, ASource]);
+    raise ESearchIndexNotFound.CreateEngine(Format('%s: index "%s" not found.', [ENGINE_NAME, ASource]),
+      404, '', COLLECTION_NOT_FOUND);
+  end;
+  if FindCollection(ASource) = '' then
+    raise ESearchIndexNotFound.CreateEngine(Format('%s: index "%s" points to the missing collection "%s".',
+      [ENGINE_NAME, ASource, LSource]), 404, '', COLLECTION_NOT_FOUND);
+  LOld := FindAlias(ATarget);
+  LOldIsCollection := (LOld = '') and (FindCollection(ATarget) <> '');
+  ForgetSchema(ATarget);
+  ForgetSchema(ASource);
+  if LOldIsCollection then
+  begin
+    // A 0.1.0 collection holds the name: an alias can't be made while it
+    // exists (finding 60), so searches miss the index until the PUT below.
+    LOld := ATarget;
+    DeleteQuietly('/collections/' + Seg(ATarget));
+  end;
+  Call('PUT', '/aliases/' + Seg(ATarget), AliasJson(LSource));
+  DeleteQuietly('/aliases/' + Seg(ASource));
+  if (LOld <> '') and (LOld <> LSource) then
+  begin
+    if not LOldIsCollection then
+      DeleteQuietly('/collections/' + Seg(LOld));
+    DeleteQuietly('/synonym_sets/' + Seg(LOld));
+    DeleteQuietly('/curation_sets/' + Seg(LOld));
+  end;
+end;
+
 
 { TTypesenseIndex }
 
@@ -1139,6 +1490,62 @@ begin
   Result := TSearchQuery.Create(Self, AText);
 end;
 
+function TTypesenseIndex.ListIds(const AFilter: ISearchFilter): TArray<string>;
+var
+  LUrl, LBody, LLine, LText: string;
+  LJson: TJsonValue;
+  P, N: Integer;
+begin
+  LText := '';
+  if AFilter <> nil then
+    LText := TypesenseFilterText(AFilter);
+  LBody := '';
+  if AFilter <> nil then
+    CheckFilterFields(FEngine.SchemaOf(FName), AFilter)
+  else
+    FEngine.SchemaOf(FName);
+  LUrl := FPath + '/documents/export?include_fields=id';
+  if LText <> '' then
+    LUrl := LUrl + '&filter_by=' + Seg(LText);
+  LBody := FEngine.Call('GET', LUrl, '');
+  // One JSON object per line.
+  Result := nil;
+  N := 0;
+  while LBody <> '' do
+  begin
+    P := Pos(#10, LBody);
+    if P = 0 then
+    begin
+      LLine := LBody;
+      LBody := '';
+    end
+    else
+    begin
+      LLine := Copy(LBody, 1, P - 1);
+      System.Delete(LBody, 1, P);
+    end;
+    LLine := Trim(LLine);
+    if LLine = '' then
+      Continue;
+    LJson := ParseBody(LLine, 'GET ' + FPath + '/documents/export');
+    try
+      if N >= Length(Result) then
+        SetLength(Result, N * 2 + 16);
+      Result[N] := SearchJsonId(SearchJsonMember(LJson, 'id'));
+      Inc(N);
+    finally
+      LJson.Free;
+    end;
+  end;
+  SetLength(Result, N);
+end;
+
+procedure TTypesenseIndex.SetSynonyms(const AGroups: array of TSearchSynonym);
+begin
+  SearchCheckSynonyms(AGroups);
+  FEngine.PutSet(FName, 'synonym_sets', TypesenseSynonymSetJson(AGroups));
+end;
+
 function TTypesenseIndex.ExecuteSearch(const ARequest: TSearchRequest): ISearchResult;
 var
   LSchema: ISearchSchema;
@@ -1146,8 +1553,10 @@ var
   LParams: TArray<TQueryParam>;
   LText, LQueryBy, LList, LUrl, LAnswer, LWhat: string;
   LRaw: TJsonValue;
-  LJson, LHits, LDoc, LFacets, LFacet, LCounts: TJsonValue;
+  LJson, LHits, LDoc, LFacets, LFacet, LCounts, LMarks, V: TJsonValue;
   LResult: TSearchResult;
+  LOutHit: TSearchHit;
+  LHighlight: TSearchHighlight;
   LTotal, LStart: Int64;
   LOut: TSearchFacet;
   I, J, K: Integer;
@@ -1196,6 +1605,10 @@ begin
     if not LSchema.FindField(ARequest.Facets[I], LField) or not LField.IsFacet then
       raise ESearchRequestError.CreateEngine(Format('Field "%s" is not a facet in index "%s".',
         [ARequest.Facets[I], FName]), 0, '', '');
+  for I := 0 to High(ARequest.Highlight) do
+    if not LSchema.FindField(ARequest.Highlight[I], LField) or not LField.IsSearchable then
+      raise ESearchRequestError.CreateEngine(Format('Field "%s" is not a Text field in index "%s": ' +
+        'it can''t be highlighted.', [ARequest.Highlight[I], FName]), 0, '', '');
   if (ARequest.PageSize > 0) and (Int64(ARequest.Page - 1) * ARequest.PageSize >= LSchema.MaxHits) then
     raise ESearchArgumentError.CreateFmt('Page %d of %d starts past the index''s MaxHits (%d).',
       [ARequest.Page, ARequest.PageSize, LSchema.MaxHits]);
@@ -1272,6 +1685,21 @@ begin
       LList := LList + ',id';
     Put('include_fields', LList);
   end;
+  if Length(ARequest.Highlight) > 0 then
+  begin
+    LList := '';
+    for I := 0 to High(ARequest.Highlight) do
+    begin
+      if I > 0 then
+        LList := LList + ',';
+      LList := LList + ARequest.Highlight[I];
+    end;
+    Put('highlight_fields', LList);
+    Put('highlight_full_fields', LList);
+    Put('highlight_start_tag', SEARCH_HIGHLIGHT_START);
+    Put('highlight_end_tag', SEARCH_HIGHLIGHT_END);
+    Put('enable_highlight_v1', 'false');
+  end;
   // Raw: a query parameter; a JSON string goes as its text.
   for I := 0 to High(ARequest.Raw) do
   begin
@@ -1315,8 +1743,23 @@ begin
         if LStart + I >= LSchema.MaxHits then
           Break;
         LDoc := SearchJsonMember(LHits.Items[I], 'document');
-        if LDoc <> nil then
-          LResult.AddHit(SearchJsonId(SearchJsonMember(LDoc, 'id')), SearchCloneJson(LDoc));
+        if LDoc = nil then
+          Continue;
+        LOutHit := LResult.AddHit(SearchJsonId(SearchJsonMember(LDoc, 'id')), SearchCloneJson(LDoc));
+        LMarks := SearchJsonMember(LHits.Items[I], 'highlight');
+        for J := 0 to High(ARequest.Highlight) do
+        begin
+          V := SearchJsonMember(LMarks, ARequest.Highlight[J]);
+          if (V = nil) or (V.Kind <> jkObject) then
+            Continue;
+          if SearchJsonMember(V, 'value') <> nil then
+            V := SearchJsonMember(V, 'value')
+          else
+            V := SearchJsonMember(V, 'snippet');
+          if (V <> nil) and (V.Kind = jkString)
+            and SearchHighlightFromMarked(ARequest.Highlight[J], V.AsString, LHighlight) then
+            LOutHit.AddHighlight(LHighlight);
+        end;
       end;
     LFacets := SearchJsonMember(LJson, 'facet_counts');
     for I := 0 to High(ARequest.Facets) do

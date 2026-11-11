@@ -14,10 +14,16 @@ This file records only what is specific to this repository.
 
 ---
 
-## Where things stand (2026-11-10)
+## Where things stand (2026-11-11)
 
-- **Decisions**: `docs/design.md` (S1-S24, accepted; sections 8-11 are what the core, the
-  Meilisearch adapter, the Typesense adapter and the outbox bridge settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
+- **0.2.0 (2026-11-11)** (design section 12, S25-S31; findings 57-71): `ReplaceIndex`,
+  `ListIds`, highlight in parts (`ToHtml` escapes), `SetSynonyms` in the contract, typed native
+  settings (Meilisearch typo/ranking/stop words, Typesense curation), `CacheMs`, and the outbox
+  bridge giving up at once (`EOutboxGiveUp`, pascal-db-faa **0.21.0**, now in `external/`).
+  Unit 201/201, integration 87/87 on each engine, sample unchanged, 0 leaks, FPC Linux and
+  Windows; the user built it on Delphi 12.
+- **Decisions**: `docs/design.md` (S1-S31, accepted; sections 8-12 are what the core, the
+  Meilisearch adapter, the Typesense adapter, the outbox bridge and 0.2.0 settled). **Engine behavior**: `docs/engine-findings.md`, numbered; the design cites it as
   "finding N". Read both before changing the contract. **Guides** for users: `docs/README.md`.
 - **Done (0.1.0)**: core (`src/`) and mock; the Meilisearch and Typesense adapters
   (`adapters/meilisearch`, `adapters/typesense`, each its own package) on pascal-common-faa
@@ -33,11 +39,18 @@ This file records only what is specific to this repository.
   `PcPercentEncode`. A POST is never sent twice by the transport, and the adapters don't
   repeat a write either (design, section 9).
 - **Typesense keeps the library's schema in the collection's metadata** (design, section 10):
-  the adapter checks filter/sort/facet fields and builds `query_by` from it.
+  the adapter checks filter/sort/facet fields and builds `query_by` from it. Since 0.2.0 an
+  index is an **alias** to the collection `<name>@<Unix ms>` (S25): `ReplaceIndex` moves the
+  alias; a 0.1.0 collection (no alias) still works. Synonym and curation sets are named like the
+  collection and deleted only after it (finding 68).
+- **Highlight never returns the engine's tagged text** (S27): the adapters ask for `#1`/`#2` as
+  tags and cut the value into parts; neither engine escapes HTML (finding 64).
 - **The outbox bridge is a handler of pascal-db-faa's local sink** (design, section 11): the
   loader decides (an id without a document is deleted), every error is raised for the outbox
-  to retry, a reindex is the application's loop over `Sync`.
-- **Released**: `v0.1.0` (2026-11-10), listed in the skill's `faa-libraries.md` and in
+  to retry, except `ESearchArgumentError`/`ESearchRequestError`, which `Handle` turns into
+  `EOutboxGiveUp` (dead at once, S30); a reindex is the application's loop over `Sync`, best
+  into a new index followed by `ReplaceIndex` (guide 9).
+- **Released**: `v0.1.0` (2026-11-10), `v0.2.0` (2026-11-11), listed in the skill's `faa-libraries.md` and in
   `using-faa-libraries`' minimum-version matrix. A release that changes a minimum version
   updates that matrix too.
 
@@ -56,7 +69,7 @@ on purpose (`'Café'`, `'Água'`).
 - **Each adapter is its own package** (`adapters/<engine>/`, `pascal_search_faa_<engine>.lpk`):
   the core needs pascal-common-faa 1.20.0, an adapter 1.31.0 (`$MESSAGE FATAL` in its unit).
   The outbox bridge too (`bridges/outbox/`, `pascal_search_faa_outbox.lpk`): only it depends on
-  pascal-db-faa (0.18.0, checked in the unit); the core never does.
+  pascal-db-faa (0.21.0 since 0.2.0, checked in the unit); the core never does.
 
 - **Every `.pas` is UTF-8 with a BOM** (a file written by a tool has none: add it). Delphi reads
   a file without one as ANSI and garbles accented literals (gotcha 9).

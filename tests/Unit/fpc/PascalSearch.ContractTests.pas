@@ -18,6 +18,11 @@
   differently (typos, accents in equality, relevance order) is not tested
   here.
 
+  0.2.0 (design, section 12): ReplaceIndex with a second index
+  (contract_products_new), ListIds, Highlight in parts, SetSynonyms. Words
+  that synonyms add are picked so that no text field comes close to them
+  (gotcha 6).
+
   DUnitX master, written in FPCUnit's assertion dialect (TAssert.*, through
   PascalSearch.DUnitXCompat). The mirror in tests/Unit/fpc is generated from
   the master by tools/gen_fpc_mirror.py: edit only the master. }
@@ -44,6 +49,7 @@ type
     function Find(const AText: string): string;
     function Where(const AFilter: ISearchFilter): string;
     function Sorted(const AQuery: ISearchQuery): string;
+    function HitById(const AResult: ISearchResult; const AId: string): ISearchHit;
   protected
     procedure SetUp; override;
     procedure TearDown; override;
@@ -94,12 +100,27 @@ type
     procedure EnsureIndex_Again_KeepsDocuments;
     procedure Index_NeverEnsured_NotFound;
     procedure DropIndex_Missing_NoError;
+
+    procedure ReplaceIndex_ExistingTarget;
+    procedure ReplaceIndex_MissingTarget_Renames;
+    procedure ReplaceIndex_Twice_SameSourceName;
+    procedure ReplaceIndex_MissingSource_NotFound;
+    procedure ListIds_AllAndFiltered;
+    procedure ListIds_PastMaxHits;
+    procedure Highlight_MatchedWords;
+    procedure Highlight_PrefixAndAccents;
+    procedure Highlight_HtmlEscaped;
+    procedure Highlight_NoText_OrFieldNotReturned;
+    procedure Synonyms_EquivalentAndOneWay;
+    procedure Synonyms_SeveralWords;
+    procedure Synonyms_ReplacedAndCleared;
   end;
 
 implementation
 
 const
   INDEX_NAME = 'contract_products';
+  STAGING_NAME = 'contract_products_new';
 
 function NewSchema: ISearchSchema;
 begin
@@ -167,6 +188,34 @@ begin
   end;
 end;
 
+// AIds sorted and joined by commas.
+function SortedText(const AIds: TArray<string>): string;
+var
+  L: TArray<string>;
+  I, J: Integer;
+  T: string;
+begin
+  L := Copy(AIds, 0, Length(AIds));
+  for I := 1 to High(L) do
+  begin
+    T := L[I];
+    J := I - 1;
+    while (J >= 0) and (CompareStr(L[J], T) > 0) do
+    begin
+      L[J + 1] := L[J];
+      Dec(J);
+    end;
+    L[J + 1] := T;
+  end;
+  Result := '';
+  for I := 0 to High(L) do
+  begin
+    if I > 0 then
+      Result := Result + ',';
+    Result := Result + L[I];
+  end;
+end;
+
 // The same, sorted: for results whose order the contract doesn't fix.
 function SortedIds(const AHits: ISearchHits): string;
 var
@@ -228,7 +277,10 @@ procedure TContractTests.TearDown;
 begin
   try
     if FEngine <> nil then
+    begin
+      FEngine.DropIndex(STAGING_NAME);
       FEngine.DropIndex(INDEX_NAME);
+    end;
   except
     // An engine that went away: the next Setup drops the index again.
   end;
@@ -650,6 +702,228 @@ begin
   TAssert.AssertFalse(FEngine.IndexExists(INDEX_NAME));
   FEngine.DropIndex(INDEX_NAME);
   TAssert.AssertFalse(FEngine.IndexExists(INDEX_NAME));
+end;
+
+
+{ 0.2.0: ReplaceIndex, ListIds, Highlight, SetSynonyms (design, section 12) }
+
+function TContractTests.HitById(const AResult: ISearchResult; const AId: string): ISearchHit;
+var
+  I: Integer;
+begin
+  for I := 0 to AResult.Count - 1 do
+    if AResult.Hit(I).Id = AId then
+      Exit(AResult.Hit(I));
+  Result := nil;
+  TAssert.Fail('No hit "' + AId + '"');
+end;
+
+// "text*|text" for the parts, * after a matched one; '(none)' without.
+function PartsText(const AHit: ISearchHit; const AField: string): string;
+var
+  H: TSearchHighlight;
+  I: Integer;
+begin
+  if not AHit.FindHighlight(AField, H) then
+    Exit('(none)');
+  Result := '';
+  for I := 0 to High(H.Parts) do
+  begin
+    if I > 0 then
+      Result := Result + '|';
+    Result := Result + H.Parts[I].Text;
+    if H.Parts[I].Matched then
+      Result := Result + '*';
+  end;
+end;
+
+function StagingSchema: ISearchSchema;
+begin
+  Result := TSearchSchema.New(STAGING_NAME)
+    .Text('title')
+    .Keyword('kind', [sfFilter]);
+end;
+
+procedure TContractTests.ReplaceIndex_ExistingTarget;
+var
+  LStaging: ISearchIndex;
+begin
+  FEngine.DropIndex(STAGING_NAME);
+  LStaging := FEngine.EnsureIndex(StagingSchema);
+  LStaging.Upsert([TSearchDocument.New('n1').Str('title', 'Novo bolo').Str('kind', 'x'),
+    TSearchDocument.New('n2').Str('title', 'Outro bolo').Str('kind', 'y')]).WaitFor(ContractWait);
+  LStaging.SetSynonyms([TSearchSynonym.Equivalent(['novo', 'fresquinho'])]);
+  FEngine.ReplaceIndex(INDEX_NAME, STAGING_NAME);
+  TAssert.AssertFalse('the source name is free', FEngine.IndexExists(STAGING_NAME));
+  TAssert.AssertTrue(FEngine.IndexExists(INDEX_NAME));
+  TAssert.AssertEquals('the new documents only', 'n1,n2', Find(''));
+  TAssert.AssertTrue('an old document is gone', FIndex.Get('1') = nil);
+  TAssert.AssertEquals('the new schema', 'n1', Where(F.Eq('kind', 'x')));
+  TAssert.AssertEquals('the new synonyms', 'n1', Find('fresquinho'));
+end;
+
+procedure TContractTests.ReplaceIndex_MissingTarget_Renames;
+var
+  LStaging: ISearchIndex;
+begin
+  FEngine.DropIndex(STAGING_NAME);
+  LStaging := FEngine.EnsureIndex(SearchSchemaRenamed(NewSchema, STAGING_NAME));
+  LStaging.Upsert(SeedDocs).WaitFor(ContractWait);
+  FEngine.DropIndex(INDEX_NAME);
+  FEngine.ReplaceIndex(INDEX_NAME, STAGING_NAME);
+  TAssert.AssertFalse(FEngine.IndexExists(STAGING_NAME));
+  TAssert.AssertTrue(FEngine.IndexExists(INDEX_NAME));
+  TAssert.AssertEquals('1,3', Find('café'));
+  TAssert.AssertEquals('1,3', Where(F.Eq('category', 'bebida')));
+end;
+
+procedure TContractTests.ReplaceIndex_Twice_SameSourceName;
+var
+  LRound: Integer;
+  LStaging: ISearchIndex;
+begin
+  for LRound := 1 to 2 do
+  begin
+    FEngine.DropIndex(STAGING_NAME);
+    LStaging := FEngine.EnsureIndex(StagingSchema);
+    LStaging.Upsert([TSearchDocument.New('r' + IntToStr(LRound)).Str('title', 'Rodada')])
+      .WaitFor(ContractWait);
+    FEngine.ReplaceIndex(INDEX_NAME, STAGING_NAME);
+    TAssert.AssertEquals(Format('round %d', [LRound]), 'r' + IntToStr(LRound), Find(''));
+  end;
+  TAssert.AssertFalse(FEngine.IndexExists(STAGING_NAME));
+end;
+
+procedure TContractTests.ReplaceIndex_MissingSource_NotFound;
+begin
+  FEngine.DropIndex(STAGING_NAME);
+  try
+    FEngine.ReplaceIndex(INDEX_NAME, STAGING_NAME);
+    TAssert.Fail('A missing source must raise');
+  except
+    on E: ESearchIndexNotFound do
+      TAssert.AssertTrue(E.Message, Pos(STAGING_NAME, E.Message) > 0);
+  end;
+  TAssert.AssertEquals('the target untouched', '1,3', Find('café'));
+  try
+    FEngine.ReplaceIndex(INDEX_NAME, INDEX_NAME);
+    TAssert.Fail('Replacing an index with itself must raise');
+  except
+    on ESearchArgumentError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TContractTests.ListIds_AllAndFiltered;
+begin
+  TAssert.AssertEquals('1,2,3,4,5,6,7', SortedText(FIndex.ListIds));
+  TAssert.AssertEquals('1,3', SortedText(FIndex.ListIds(F.Eq('category', 'bebida'))));
+  TAssert.AssertEquals('', SortedText(FIndex.ListIds(F.Eq('category', 'nothing'))));
+  try
+    FIndex.ListIds(F.Eq('title', 'x'));
+    TAssert.Fail('A filter on a field not declared filterable must raise');
+  except
+    on ESearchRequestError do
+      TAssert.AssertTrue(True);
+  end;
+end;
+
+procedure TContractTests.ListIds_PastMaxHits;
+var
+  LIndex: ISearchIndex;
+  LDocs: TSearchDocuments;
+  I: Integer;
+begin
+  FEngine.DropIndex(STAGING_NAME);
+  LIndex := FEngine.EnsureIndex(TSearchSchema.New(STAGING_NAME).Text('title').WithMaxHits(2));
+  LDocs := nil;
+  SetLength(LDocs, 5);
+  for I := 0 to High(LDocs) do
+    LDocs[I] := TSearchDocument.New('m' + IntToStr(I)).Str('title', 'x');
+  LIndex.Upsert(LDocs).WaitFor(ContractWait);
+  TAssert.AssertEquals('m0,m1,m2,m3,m4', SortedText(LIndex.ListIds));
+  FEngine.DropIndex(STAGING_NAME);
+end;
+
+procedure TContractTests.Highlight_MatchedWords;
+var
+  R: ISearchResult;
+begin
+  R := FIndex.Search('café').Highlight(['title', 'body']).Execute;
+  TAssert.AssertEquals('Café*| com leite', PartsText(HitById(R, '1'), 'title'));
+  TAssert.AssertEquals('Bebida quente servida no |café*| da manhã', PartsText(HitById(R, '1'), 'body'));
+  TAssert.AssertEquals('Café*| preto', PartsText(HitById(R, '3'), 'title'));
+  TAssert.AssertEquals('no match in the field', '(none)', PartsText(HitById(R, '3'), 'body'));
+  TAssert.AssertEquals('a field not asked', '(none)',
+    PartsText(HitById(FIndex.Search('café').Highlight(['body']).Execute, '3'), 'title'));
+end;
+
+procedure TContractTests.Highlight_PrefixAndAccents;
+var
+  R: ISearchResult;
+  H: TSearchHighlight;
+begin
+  R := FIndex.Search('caf').Highlight(['title']).Execute;
+  TAssert.AssertEquals('the matched start only', 'Caf*|é com leite', PartsText(HitById(R, '1'), 'title'));
+  R := FIndex.Search('agua').Highlight(['title']).Execute;
+  TAssert.AssertEquals('Água*| de coco', PartsText(HitById(R, '4'), 'title'));
+  TAssert.AssertTrue(HitById(R, '4').FindHighlight('title', H));
+  TAssert.AssertEquals('Água de coco', H.Text);
+end;
+
+procedure TContractTests.Highlight_HtmlEscaped;
+var
+  R: ISearchResult;
+  H: TSearchHighlight;
+begin
+  FIndex.Upsert([TSearchDocument.New('8').Str('title', 'Pão <b>de</b> queijo & "aspas"')])
+    .WaitFor(ContractWait);
+  R := FIndex.Search('queijo').Highlight(['title']).Execute;
+  TAssert.AssertTrue(HitById(R, '8').FindHighlight('title', H));
+  TAssert.AssertEquals('Pão &lt;b&gt;de&lt;/b&gt; <mark>queijo</mark> &amp; &quot;aspas&quot;', H.ToHtml);
+  TAssert.AssertEquals('Pão &lt;b&gt;de&lt;/b&gt; [queijo] &amp; &quot;aspas&quot;', H.ToHtml('[', ']'));
+  TAssert.AssertEquals('Pão <b>de</b> queijo & "aspas"', H.Text);
+end;
+
+procedure TContractTests.Highlight_NoText_OrFieldNotReturned;
+var
+  R: ISearchResult;
+begin
+  R := FIndex.Search('').Highlight(['title']).Execute;
+  TAssert.AssertEquals('an empty text marks nothing', '(none)', PartsText(HitById(R, '1'), 'title'));
+  R := FIndex.Search('café').Fields(['id']).Highlight(['title']).Execute;
+  TAssert.AssertTrue('only the id comes back', HitById(R, '1').Document.Find('title') = nil);
+  TAssert.AssertTrue('the document has no highlight member', HitById(R, '1').Document.Find('_formatted') = nil);
+  TAssert.AssertEquals('Café*| com leite', PartsText(HitById(R, '1'), 'title'));
+end;
+
+procedure TContractTests.Synonyms_EquivalentAndOneWay;
+begin
+  FIndex.SetSynonyms([
+    TSearchSynonym.Equivalent(['moleque', 'piá']),
+    TSearchSynonym.OneWay('amendoim', ['polvilho'])]);
+  TAssert.AssertEquals('piá', '5', Find('piá'));
+  TAssert.AssertEquals('PIA, accents and case folded', '5', Find('PIA'));
+  TAssert.AssertEquals('moleque', '5', Find('moleque'));
+  TAssert.AssertEquals('the root finds its words', '2,5', Find('amendoim'));
+  TAssert.AssertEquals('a word doesn''t find the root', '2', Find('polvilho'));
+end;
+
+procedure TContractTests.Synonyms_SeveralWords;
+begin
+  FIndex.SetSynonyms([TSearchSynonym.Equivalent(['café preto', 'expresso'])]);
+  TAssert.AssertEquals('expresso', '3', Find('expresso'));
+  TAssert.AssertEquals('café preto', '3', Find('café preto'));
+end;
+
+procedure TContractTests.Synonyms_ReplacedAndCleared;
+begin
+  FIndex.SetSynonyms([TSearchSynonym.Equivalent(['moleque', 'piá'])]);
+  TAssert.AssertEquals('5', Find('piá'));
+  FIndex.SetSynonyms([TSearchSynonym.Equivalent(['quindim', 'piá'])]);
+  TAssert.AssertEquals('the groups replaced', '7', Find('piá'));
+  FIndex.SetSynonyms([]);
+  TAssert.AssertEquals('cleared', '', Find('piá'));
 end;
 
 initialization

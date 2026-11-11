@@ -30,6 +30,9 @@ function SearchJsonText(AJson: TJsonValue; const AName: string): string;
 /// has no such member.
 function SearchJsonMember(AJson: TJsonValue; const AName: string): TJsonValue;
 
+/// A copy of the object AJson without its members named AName.
+function SearchCloneJsonWithout(AJson: TJsonValue; const AName: string): TJsonValue;
+
 /// A document id as an engine returns it: a string, or the text of a number
 /// (a document written by something other than this library); '' otherwise.
 function SearchJsonId(AValue: TJsonValue): string;
@@ -44,7 +47,8 @@ function SearchFieldKindByName(const AName: string; out AKind: TSearchFieldKind)
 implementation
 
 uses
-  PascalSearch.Errors;
+  PascalSearch.Errors,
+  PascalSearch.Documents;
 
 function SearchParseAnswer(const ABody, AWhat: string): TJsonValue;
 begin
@@ -54,6 +58,23 @@ begin
     on E: EJsonError do
       raise ESearchUnavailable.CreateEngine(Format('%s: the answer isn''t JSON (%s).',
         [AWhat, E.Message]), 0, '', '');
+  end;
+end;
+
+function SearchCloneJsonWithout(AJson: TJsonValue; const AName: string): TJsonValue;
+var
+  I: Integer;
+begin
+  if AJson.Kind <> jkObject then
+    Exit(SearchCloneJson(AJson));
+  Result := TJsonValue.CreateObject;
+  try
+    for I := 0 to AJson.Count - 1 do
+      if AJson.Names[I] <> AName then
+        Result.AddPair(AJson.Names[I], SearchCloneJson(AJson.Items[I]));
+  except
+    Result.Free;
+    raise;
   end;
 end;
 

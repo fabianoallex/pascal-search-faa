@@ -62,6 +62,9 @@ type
     procedure Schema_NoTextFields;
     procedure Schema_KindChange_InPlace;
     procedure Native_SendAndWaitForTask;
+    procedure Native_TypoTolerance;
+    procedure Native_StopWordsAndRankingRules;
+    procedure ReplaceIndex_SettingsTravel;
   end;
 
 implementation
@@ -69,6 +72,7 @@ implementation
 const
   IDX = 'it_meili';
   NEVER = 'it_never';
+  STAGING = 'it_meili_new';
 
 { TMeilisearchIntegrationTests }
 
@@ -86,6 +90,7 @@ begin
     begin
       FEngine.DropIndex(IDX);
       FEngine.DropIndex(NEVER);
+      FEngine.DropIndex(STAGING);
     end;
   except
     // The next Setup drops them again.
@@ -250,6 +255,63 @@ begin
     on E: ESearchIndexNotFound do
       TAssert.AssertEquals(404, E.HttpStatus);
   end;
+end;
+
+function NoTypos: TMeilisearchTypoTolerance;
+begin
+  Result := TMeilisearchTypoTolerance.Standard;
+  Result.Enabled := False;
+end;
+
+procedure TMeilisearchIntegrationTests.Native_TypoTolerance;
+var
+  LIndex: ISearchIndex;
+begin
+  LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+  LIndex.Upsert([TSearchDocument.New('1').Str('title', 'queijo')]).WaitFor;
+  TAssert.AssertEquals('one typo from 5 letters (finding 16)', Int64(1), LIndex.Search('queiju').Execute.Total);
+  FEngine.SetTypoTolerance(IDX, NoTypos);
+  TAssert.AssertEquals('applied on return', Int64(0), LIndex.Search('queiju').Execute.Total);
+  TAssert.AssertTrue(Pos('"enabled":false', FEngine.Send('GET', '/indexes/' + IDX + '/settings/typo-tolerance')) > 0);
+end;
+
+procedure TMeilisearchIntegrationTests.Native_StopWordsAndRankingRules;
+begin
+  FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title').Num('price', [sfSort]));
+  FEngine.SetStopWords(IDX, ['de', 'com']);
+  TAssert.AssertEquals('["com","de"]', FEngine.Send('GET', '/indexes/' + IDX + '/settings/stop-words'));
+  FEngine.SetRankingRules(IDX, ['words', 'typo', 'proximity', 'attribute', 'sort', 'exactness', 'price:asc']);
+  TAssert.AssertTrue(Pos('price:asc', FEngine.Send('GET', '/indexes/' + IDX + '/settings/ranking-rules')) > 0);
+  try
+    FEngine.SetRankingRules(IDX, ['nope']);
+    TAssert.Fail('An unknown rule must raise');
+  except
+    on E: ESearchRequestError do
+      TAssert.AssertEquals('invalid_settings_ranking_rules', E.EngineCode);
+  end;
+  try
+    FEngine.SetStopWords(NEVER, []);
+    TAssert.Fail('A missing index must raise');
+  except
+    on ESearchIndexNotFound do
+      TAssert.AssertFalse('not created by the settings call', FEngine.IndexExists(NEVER));
+  end;
+end;
+
+procedure TMeilisearchIntegrationTests.ReplaceIndex_SettingsTravel;
+var
+  LIndex: ISearchIndex;
+begin
+  LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+  LIndex.Upsert([TSearchDocument.New('old').Str('title', 'queijo')]).WaitFor;
+  FEngine.DropIndex(STAGING);
+  FEngine.EnsureIndex(TSearchSchema.New(STAGING).Text('title'))
+    .Upsert([TSearchDocument.New('new').Str('title', 'queijo')]).WaitFor;
+  FEngine.SetTypoTolerance(STAGING, NoTypos);
+  FEngine.ReplaceIndex(IDX, STAGING);
+  TAssert.AssertEquals('new', LIndex.Search('queijo').Execute.Hit(0).Id);
+  TAssert.AssertEquals('the source''s settings came along', Int64(0), LIndex.Search('queiju').Execute.Total);
+  TAssert.AssertFalse(FEngine.IndexExists(STAGING));
 end;
 
 initialization

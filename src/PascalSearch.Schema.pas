@@ -104,10 +104,37 @@ const
 
 function SearchFieldKindName(AKind: TSearchFieldKind): string;
 
+/// A copy of ASchema under the index name AName (same fields, flags and
+/// MaxHits): what ReplaceIndex leaves under the target's name.
+function SearchSchemaRenamed(const ASchema: ISearchSchema; const AName: string): ISearchSchema;
+
 implementation
 
 uses
   PascalSearch.Errors;
+
+function SearchSchemaRenamed(const ASchema: ISearchSchema; const AName: string): ISearchSchema;
+var
+  LField: TSearchField;
+  I: Integer;
+begin
+  Result := TSearchSchema.New(AName).WithMaxHits(ASchema.MaxHits);
+  for I := 0 to ASchema.FieldCount - 1 do
+  begin
+    LField := ASchema.Field(I);
+    case LField.Kind of
+      skText: Result.Text(LField.Name, LField.Flags);
+      skKeyword: Result.Keyword(LField.Name, LField.Flags);
+      skKeywords: Result.Keywords(LField.Name, LField.Flags);
+      skNumber: Result.Num(LField.Name, LField.Flags);
+      skInteger: Result.Int(LField.Name, LField.Flags);
+      skBoolean: Result.Bool(LField.Name, LField.Flags);
+      skInstant: Result.Instant(LField.Name, LField.Flags);
+    else
+      Result.Stored(LField.Name);
+    end;
+  end;
+end;
 
 function SearchFieldKindName(AKind: TSearchFieldKind): string;
 begin

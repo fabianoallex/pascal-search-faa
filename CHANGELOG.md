@@ -3,6 +3,48 @@
 All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`; until 1.0.0 the
 contract may change in a minor version (it is validated against two engines first).
 
+## [0.2.0] - 2026-11-11
+
+Decisions: `docs/design.md`, section 12 (S25-S31); what the engines did: findings 57-71.
+
+### Added
+
+- `ISearchEngine.ReplaceIndex(Target, Source)`: `Target` serves what `Source` held (documents,
+  schema, synonyms, settings), `Source`'s name is free, `Target`'s old content gone; a missing
+  `Target` is a rename. Meilisearch swaps the indexes in one task (or renames) and drops the
+  source; Typesense moves an alias (below); the mock moves the data. Guide 9.
+- `ISearchIndex.ListIds(Filter = nil)`: every id, past `MaxHits` (Meilisearch pages
+  `/documents/fetch`, Typesense one export).
+- Highlight: `ISearchQuery.Highlight([...])` on Text fields, `ISearchHit.FindHighlight`,
+  `TSearchHighlight` (`Parts`, `Text`, `ToHtml`, which escapes `& < > " '`). The adapters ask the
+  engines for `#1`/`#2` as tags and never hand out the engine's text: neither engine escapes
+  HTML. `SearchHighlightFromMarked`, `SearchHtmlEscape`.
+- Synonyms: `ISearchIndex.SetSynonyms([TSearchSynonym.Equivalent(...), .OneWay(...)])`,
+  replacing every group, applied when it returns (`SearchCheckSynonyms` at the call).
+  Meilisearch: the `synonyms` setting; Typesense: a synonym set named like the collection,
+  attached to it, deleted after it; the mock applies them.
+- Typed native settings: `IMeilisearchEngine.SetTypoTolerance` (`TMeilisearchTypoTolerance`),
+  `SetRankingRules`, `SetStopWords`; `ITypesenseEngine.SetCuration` (`TTypesenseCuration`).
+- `CacheMs` in both configs (0: 60 s): what an adapter reads about an index (Typesense its
+  schema, Meilisearch `MaxHits`) expires, so another process's `ReplaceIndex` is seen.
+- `SearchSchemaRenamed(Schema, Name)`; `TypesenseSynonymSetJson`, `MeilisearchSynonymsJson`;
+  `TypesenseCollectionJson` takes the collection's name.
+- Guide 9, "Rebuilding an index".
+
+### Changed
+
+- **Typesense: an index is an alias to a collection of its own.** `EnsureIndex` of a new index
+  creates the collection `<name>@<Unix ms>` and the alias `<name>`; everything goes through the
+  alias. A collection made by 0.1.0 keeps working; `ReplaceIndex` onto it drops it first (a few
+  ms of `ESearchIndexNotFound`), and it can't be a replace's source (`ESearchNotSupported`).
+  `DropIndex` drops the collection, the alias and the library's synonym and curation sets.
+- **The outbox bridge needs pascal-db-faa 0.21.0**: `Handle` turns `ESearchArgumentError` and
+  `ESearchRequestError` into `EOutboxGiveUp`, so the local sink marks the delivery dead at the
+  first try instead of after `MaxAttempts`. `Sync` still raises the library's errors.
+- `ISearchHit` has `FindHighlight`; `TSearchHitList.AddHit` returns the hit. Code implementing
+  `ISearchIndex` or `ISearchEngine` itself needs the new methods.
+- Meilisearch's `_formatted` is no longer part of a hit's `Document`.
+
 ## [0.1.0] - 2026-11-10
 
 ### Added
