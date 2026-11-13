@@ -58,7 +58,7 @@ This file records only what is specific to this repository.
   to retry, except `ESearchArgumentError`/`ESearchRequestError`, which `Handle` turns into
   `EOutboxGiveUp` (dead at once, S30); a reindex is the application's loop over `Sync`, best
   into a new index followed by `ReplaceIndex` (guide 9).
-- **Released**: `v0.1.0` (2026-11-10), `v0.2.0` (2026-11-11), listed in the skill's `faa-libraries.md` and in
+- **Released**: `v0.1.0` (2026-11-10), `v0.2.0` (2026-11-11), `v0.3.0` (2026-11-13), listed in the skill's `faa-libraries.md` and in
   `using-faa-libraries`' minimum-version matrix. A release that changes a minimum version
   updates that matrix too.
 
