@@ -3,7 +3,7 @@
 {$I pascalsearch.inc}
 
 (* The contract on Meilisearch (pinned and probed: v1.56.2), over
-  pascal-common-faa's HTTP client (PascalCommon.Http, 1.31.0 or later), which
+  pascal-common-faa's HTTP client (PascalCommon.Http, 1.33.0 or later), which
   verifies TLS on both compilers.
 
     Config := TMeilisearchConfig.Create('https://search.local:7700', LKey);
@@ -12,6 +12,17 @@
 
   Keep one engine per server and share it between threads: it owns one HTTP
   transport, whose pool of kept-alive connections serves the task polling.
+
+  Telemetry (design, section 13): the transport, the engine's own or the one
+  given to New, is wrapped with PcNewTracedHttpTransport. Each request is a
+  client span under the thread's current span (none without one) carrying
+  its traceparent, and a point of http.client.request.duration on PcMetrics.
+  Don't pass a transport that is already wrapped: each call would make two
+  spans and two points. url.full has the path (index names, a document's id
+  in Get), never the query; the key goes in a header. The polls of a wait
+  make no span, only the metric: under a current span the wait is one
+  internal span, meilisearch.wait_task, with meilisearch.task.uid,
+  .status and .polls, an error when the task didn't succeed.
 
   How the contract maps (docs/design.md; "finding N" is
   docs/engine-findings.md):
@@ -81,6 +92,8 @@ const
   MEILISEARCH_DEFAULT_WAIT_MS = 30000;
   /// TMeilisearchConfig.CacheMs = 0.
   MEILISEARCH_DEFAULT_CACHE_MS = 60000;
+  /// The internal span around a wait for a task, under the current span.
+  MEILISEARCH_WAIT_SPAN = 'meilisearch.wait_task';
 
 type
   TMeilisearchConfig = record
@@ -153,16 +166,24 @@ type
     FConfig: TMeilisearchConfig;
     FBase: string;
     FTransport: IPcHttpTransport;
+    /// The same inner transport (and pool), recorded without spans: the
+    /// task polls of a wait.
+    FPollTransport: IPcHttpTransport;
     FLock: TCriticalSection;
     FMaxHitsNames: TArray<string>;
     FMaxHitsValues: TArray<Integer>;
     FMaxHitsAt: TArray<UInt64>;
     function WaitLimit(ATimeoutMs: Integer): Integer;
-    function Exchange(const AMethod, APath, ABody: string): TPcHttpResponse;
+    function Exchange(const AMethod, APath, ABody: string): TPcHttpResponse; overload;
+    function Exchange(const ATransport: IPcHttpTransport;
+      const AMethod, APath, ABody: string): TPcHttpResponse; overload;
     procedure RaiseAnswer(const AMethod, APath: string; const AResponse: TPcHttpResponse);
-    function Call(const AMethod, APath, ABody: string): string;
+    function Call(const AMethod, APath, ABody: string): string; overload;
+    function Call(const ATransport: IPcHttpTransport; const AMethod, APath, ABody: string): string; overload;
     function StartTask(const AMethod, APath, ABody: string): Int64;
-    function ReadTask(ATaskUid: Int64): TMeilisearchTask;
+    /// APoll: a read inside a wait, recorded without a span.
+    function ReadTask(ATaskUid: Int64; APoll: Boolean = False): TMeilisearchTask;
+    function PollTask(ATaskUid: Int64; ALimit: Integer; out APolls: Integer): TMeilisearchTask;
     function AwaitTask(ATaskUid: Int64; ATimeoutMs: Integer): TMeilisearchTask;
     procedure RaiseTask(const ATask: TMeilisearchTask; const AWhat: string);
     function FindIndexInfo(const AName: string; out APrimaryKey: string): Boolean;
@@ -213,6 +234,8 @@ uses
   PascalCommon.Version,
   PascalCommon.Utf8,
   PascalCommon.SystemContext,
+  PascalCommon.Tracing,
+  PascalCommon.Http.Telemetry,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Values,
@@ -220,8 +243,8 @@ uses
   PascalSearch.Query,
   PascalSearch.EngineJson;
 
-{$IF PASCALCOMMON_VERSION < 13100}
-  {$MESSAGE FATAL 'pascal-search-faa needs pascal-common-faa 1.31.0 or later (PascalCommon.Http)'}
+{$IF PASCALCOMMON_VERSION < 13300}
+  {$MESSAGE FATAL 'pascal-search-faa needs pascal-common-faa 1.33.0 or later (PascalCommon.Http.Telemetry)'}
 {$IFEND}
 
 const
@@ -478,6 +501,8 @@ constructor TMeilisearchEngine.Create(const AConfig: TMeilisearchConfig;
   const ATransport: IPcHttpTransport);
 var
   LUrl: TPcHttpUrl;
+  LInner: IPcHttpTransport;
+  LPollOptions: TPcHttpTelemetryOptions;
 begin
   inherited Create;
   FLock := TCriticalSection.Create;
@@ -495,13 +520,20 @@ begin
     raise ESearchArgumentError.CreateFmt('%s: the URL is the server only, without a path or query (got "%s").',
       [ENGINE_NAME, AConfig.Url]);
   if ATransport <> nil then
-    FTransport := ATransport
+    LInner := ATransport
   else
-    FTransport := PcNewHttpTransport(AConfig.Http);
+    LInner := PcNewHttpTransport(AConfig.Http);
+  // Every call is a client span under the current one and a duration on
+  // PcMetrics; the task polls only the duration (design, section 13).
+  FTransport := PcNewTracedHttpTransport(LInner);
+  LPollOptions := Default(TPcHttpTelemetryOptions);
+  LPollOptions.NoSpans := True;
+  FPollTransport := PcNewTracedHttpTransport(LInner, LPollOptions);
 end;
 
 destructor TMeilisearchEngine.Destroy;
 begin
+  FPollTransport := nil;
   FTransport := nil;
   FLock.Free;
   inherited Destroy;
@@ -523,6 +555,12 @@ begin
 end;
 
 function TMeilisearchEngine.Exchange(const AMethod, APath, ABody: string): TPcHttpResponse;
+begin
+  Result := Exchange(FTransport, AMethod, APath, ABody);
+end;
+
+function TMeilisearchEngine.Exchange(const ATransport: IPcHttpTransport;
+  const AMethod, APath, ABody: string): TPcHttpResponse;
 var
   LRequest: TPcHttpRequest;
 begin
@@ -536,7 +574,7 @@ begin
     LRequest.Body := ABody;
   end;
   try
-    Result := FTransport.Send(LRequest);
+    Result := ATransport.Send(LRequest);
   except
     on E: EPcHttpTransport do
       raise ESearchUnavailable.CreateEngine(Format('%s: no answer: %s', [ENGINE_NAME, E.Message]), 0, '', '');
@@ -591,10 +629,16 @@ begin
 end;
 
 function TMeilisearchEngine.Call(const AMethod, APath, ABody: string): string;
+begin
+  Result := Call(FTransport, AMethod, APath, ABody);
+end;
+
+function TMeilisearchEngine.Call(const ATransport: IPcHttpTransport;
+  const AMethod, APath, ABody: string): string;
 var
   LResponse: TPcHttpResponse;
 begin
-  LResponse := Exchange(AMethod, APath, ABody);
+  LResponse := Exchange(ATransport, AMethod, APath, ABody);
   if not IsSuccess(LResponse.Status) then
     RaiseAnswer(AMethod, APath, LResponse);
   Result := LResponse.Body;
@@ -623,13 +667,18 @@ begin
   Result := TaskUidOf(Call(AMethod, APath, ABody), AMethod + ' ' + APath);
 end;
 
-function TMeilisearchEngine.ReadTask(ATaskUid: Int64): TMeilisearchTask;
+function TMeilisearchEngine.ReadTask(ATaskUid: Int64; APoll: Boolean): TMeilisearchTask;
 var
   LPath: string;
   LJson, LError: TJsonValue;
+  LTransport: IPcHttpTransport;
 begin
   LPath := '/tasks/' + IntToStr(ATaskUid);
-  LJson := ParseBody(Call('GET', LPath, ''), 'GET ' + LPath);
+  if APoll then
+    LTransport := FPollTransport
+  else
+    LTransport := FTransport;
+  LJson := ParseBody(Call(LTransport, 'GET', LPath, ''), 'GET ' + LPath);
   try
     Result := Default(TMeilisearchTask);
     Result.Uid := ATaskUid;
@@ -654,21 +703,21 @@ begin
   end;
 end;
 
-function TMeilisearchEngine.AwaitTask(ATaskUid: Int64; ATimeoutMs: Integer): TMeilisearchTask;
+function TMeilisearchEngine.PollTask(ATaskUid: Int64; ALimit: Integer;
+  out APolls: Integer): TMeilisearchTask;
 var
   LStart: UInt64;
-  LLimit: Integer;
   LDelay: Cardinal;
 begin
-  LLimit := WaitLimit(ATimeoutMs);
   LStart := TTicker.NowMs;
   LDelay := POLL_FIRST_MS;
-  Result := ReadTask(ATaskUid);
+  APolls := 1;
+  Result := ReadTask(ATaskUid, True);
   while not Result.Finished do
   begin
-    if TTicker.ElapsedMs(LStart) >= UInt64(LLimit) then
+    if TTicker.ElapsedMs(LStart) >= UInt64(ALimit) then
       raise ESearchTimeout.CreateEngine(Format('%s: task %d still %s after %d ms.',
-        [ENGINE_NAME, ATaskUid, Result.Status, LLimit]), 0, '', '');
+        [ENGINE_NAME, ATaskUid, Result.Status, ALimit]), 0, '', '');
     TSleep.Sleep(LDelay);
     if LDelay < POLL_MAX_MS then
     begin
@@ -676,7 +725,48 @@ begin
       if LDelay > POLL_MAX_MS then
         LDelay := POLL_MAX_MS;
     end;
-    Result := ReadTask(ATaskUid);
+    Inc(APolls);
+    Result := ReadTask(ATaskUid, True);
+  end;
+end;
+
+// The polls make no span of their own: under a current span, the wait is
+// one internal span, meilisearch.wait_task (design, section 13).
+function TMeilisearchEngine.AwaitTask(ATaskUid: Int64; ATimeoutMs: Integer): TMeilisearchTask;
+var
+  LLimit, LPolls: Integer;
+  LSpan: IPcSpan;
+begin
+  LLimit := WaitLimit(ATimeoutMs);
+  if TPcTracing.Current = nil then
+  begin
+    Result := PollTask(ATaskUid, LLimit, LPolls);
+    Exit;
+  end;
+  LPolls := 0;
+  LSpan := TPcTracing.StartSpan(MEILISEARCH_WAIT_SPAN, skInternal);
+  try
+    LSpan.SetIntAttribute('meilisearch.task.uid', ATaskUid);
+    try
+      Result := PollTask(ATaskUid, LLimit, LPolls);
+      LSpan.SetIntAttribute('meilisearch.task.polls', LPolls);
+      LSpan.SetAttribute('meilisearch.task.status', Result.Status);
+      if Result.Status <> 'succeeded' then
+      begin
+        LSpan.SetAttribute('error.type', Result.ErrorCode);
+        LSpan.SetStatus(ssError, Result.ErrorMessage);
+      end;
+    except
+      on E: Exception do
+      begin
+        LSpan.SetIntAttribute('meilisearch.task.polls', LPolls);
+        LSpan.SetAttribute('error.type', E.ClassName);
+        LSpan.SetStatus(ssError, E.Message);
+        raise;
+      end;
+    end;
+  finally
+    LSpan.Finish;
   end;
 end;
 

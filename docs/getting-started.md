@@ -19,7 +19,7 @@ In tests, use the mock (guide 6): the same contract in memory, no server.
 Each `*-faa` library is the application's own git submodule (one copy per application):
 
 - [pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0 or later for
-  the core, **1.31.0 or later** with an adapter (its HTTP client);
+  the core, **1.33.0 or later** with an adapter (its HTTP client and its telemetry);
 - [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa) 0.7.0 or later;
 - [pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.21.0 or later, only for the
   outbox bridge (guide 7; 0.21.0 brought `EOutboxGiveUp`).
@@ -35,7 +35,7 @@ pascal-jsonmapper-faa, plus `adapters/meilisearch` or `adapters/typesense` (and
 against another copy registered in the IDE.
 
 An adapter checks pascal-common-faa's version at compile time: an older copy stops the build
-with "pascal-search-faa needs pascal-common-faa 1.31.0 or later". Your own code can check this
+with "pascal-search-faa needs pascal-common-faa 1.33.0 or later". Your own code can check this
 library's version the same way (`PASCALSEARCH_VERSION` in `PascalSearch.Version`).
 
 Every FPC program calls `SetMultiByteConversionCodePage(CP_UTF8)` at startup and, on Unix,
@@ -79,3 +79,30 @@ uses PascalSearch.Interfaces, PascalSearch.Typesense;
   of kept-alive connections; each call is its own exchange.
 - Linux: the package `libssl3` (Debian 12; no `libssl-dev`), and `ca-certificates` for a
   server with a public certificate.
+
+## Tracing and metrics
+
+Since 0.3.0 both adapters record their HTTP calls with pascal-common-faa's
+`PascalCommon.Http.Telemetry`, with nothing to turn on:
+
+- **A client span per request**, under the thread's current span (`TPcTracing`): named after
+  the method, with OpenTelemetry's HTTP attributes (`url.full`, `server.address`,
+  `http.response.status_code`, `error.type` on a failure). The request carries the span's
+  `traceparent`. **Without a current span there is no span** and no `traceparent`: a call
+  made inside a request your server traced (pascal-api-infra-faa's middleware) shows under it,
+  a call from a bare thread doesn't.
+- **The metric `http.client.request.duration`** on `PcMetrics` for every request, span or not,
+  labelled by method, host, port, scheme, status and `error.type`; never the path.
+- **Meilisearch's waits**: polling a task makes no span (only the metric). Under a current
+  span, each wait is one internal span, `meilisearch.wait_task`, with the task's uid, its final
+  status and the number of polls; a task that failed is an error there. A typical upsert under
+  a span is three spans: the index check, the `POST`, the wait.
+- **What reaches your collector**: `url.full` is the URL without its query, so it holds index
+  names and, for `Get`, a document's id (`/indexes/products/documents/123`). If your ids are
+  personal data, they leave with the spans. The search text and filters don't (a body or a
+  query), and the API key is a header on both engines.
+- A transport you pass to `New` is wrapped too: **don't pass one already wrapped** with
+  `PcNewTracedHttpTransport`, or each call is recorded twice.
+
+The cost is a few microseconds a request (pascal-common-faa measured 2 µs for the metric,
+3.3 µs with a span), nothing next to a search over a network.

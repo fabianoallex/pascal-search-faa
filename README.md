@@ -8,10 +8,10 @@ engine (Meilisearch first, Typesense to validate the contract), an in-memory moc
 and a bridge that keeps an index in step with the database through pascal-db-faa's
 transactional outbox.
 
-**Status: 0.2.0.** The core, the mock, both adapters (Meilisearch, Typesense) and the outbox
+**Status: 0.3.0.** The core, the mock, both adapters (Meilisearch, Typesense) and the outbox
 bridge are done; the same contract suite passes on the mock and on both engines. 0.2.0 added
 `ReplaceIndex`, `ListIds`, highlight, synonyms, typed engine settings and the bridge giving up
-at once on a caller's bug. Versions stay 0.x while the contract may still change. **Guides:
+at once on a caller's bug; 0.3.0 traces the adapters' HTTP calls and records their duration. Versions stay 0.x while the contract may still change. **Guides:
 [`docs/README.md`](docs/README.md).**
 
 Part of the `*-faa` family (MIT, Delphi 12 and FPC 3.2.2, `{$MODE DELPHI}`). Not an adapter of
@@ -91,6 +91,12 @@ begin
 - Linux: the package `libssl3` (Debian 12; no `libssl-dev` needed), and `ca-certificates` for a
   server with a public certificate.
 
+Both adapters record every request (pascal-common-faa's `PascalCommon.Http.Telemetry`): a client
+span under the thread's current span, with its `traceparent` sent, and
+`http.client.request.duration` on `PcMetrics`. Meilisearch's task polls make only the metric; a
+wait is one `meilisearch.wait_task` span. `url.full` holds index names and, for `Get`, a
+document's id. Guide 1, "Tracing and metrics".
+
 ## Typesense
 
 ```pascal
@@ -148,13 +154,13 @@ id, a request the engine refuses) is dead at once. Guide:
 | `PascalSearch.Typesense` | the Typesense adapter (`adapters/typesense`, own package) |
 | `PascalSearch.Outbox` | the outbox bridge (`bridges/outbox`, own package; needs pascal-db-faa) |
 
-Docs: the guides in [`docs/README.md`](docs/README.md); [`design.md`](docs/design.md) (decisions S1-S31; sections 8-12 what the
+Docs: the guides in [`docs/README.md`](docs/README.md); [`design.md`](docs/design.md) (decisions S1-S36; sections 8-13 what the
 implementation settled), [`engine-findings.md`](docs/engine-findings.md)
 (what Meilisearch 1.56.2 and Typesense 30.2 did when probed), [`gotchas.md`](docs/gotchas.md).
 
 ## Dependencies
 
-[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0+ (1.31.0+ with an
+[pascal-common-faa](https://github.com/fabianoallex/pascal-common-faa) 1.20.0+ (1.33.0+ with an
 adapter) and [pascal-jsonmapper-faa](https://github.com/fabianoallex/pascal-jsonmapper-faa)
 0.7.0+, each as the application's own submodule; the outbox bridge also
 [pascal-db-faa](https://github.com/fabianoallex/pascal-db-faa) 0.21.0+. Delphi: add `src/` of

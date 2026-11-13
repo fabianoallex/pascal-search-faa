@@ -19,6 +19,11 @@
    What Typesense itself does with these requests is the integration
    suite's job (tests/Integration).
 
+   The telemetry test (design, section 13) starts TPcTracing without its
+   export thread and reads the spans from a fake exporter after FlushNow;
+   http.client.request.duration is the process-wide histogram, read before
+   and after.
+
    DUnitX master, written in FPCUnit's assertion dialect (TAssert.*, through
    PascalSearch.DUnitXCompat). The mirror in tests/Unit/fpc is generated from
    the master by tools/gen_fpc_mirror.py: edit only the master. *)
@@ -29,8 +34,12 @@ uses
   fpcunit, testregistry,
   SysUtils,
   PascalCommon.SystemContext,
+  PascalCommon.TraceContext,
+  PascalCommon.Tracing,
+  PascalCommon.Metrics,
   PascalCommon.Http,
   PascalCommon.Http.Fake,
+  PascalCommon.Http.Telemetry,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Values,
@@ -41,6 +50,13 @@ uses
   PascalSearch.Typesense;
 
 type
+  // Keeps every span it is given.
+  TTypesenseSpanExporter = class(TInterfacedObject, IPcSpanExporter)
+  public
+    Spans: TPcSpanDataArray;
+    function ExportSpans(const ASpans: TPcSpanDataArray; out AError: string): Boolean;
+  end;
+
   TFixedClock = class(TInterfacedObject, IClock)
   public
     function Now: TDateTime;
@@ -114,6 +130,7 @@ type
     procedure SetCuration_PutsSet;
     procedure Search_Highlight;
     procedure Schema_CacheExpires;
+    procedure Telemetry_ClientSpansUnderTheCurrent_NoneWithout;
   end;
 
 implementation
@@ -174,6 +191,59 @@ begin
     .Num('price', [sfFilter, sfSort])
     .Stored('note')
     .WithMaxHits(5);
+end;
+
+{ TTypesenseSpanExporter }
+
+function TTypesenseSpanExporter.ExportSpans(const ASpans: TPcSpanDataArray;
+  out AError: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ASpans) do
+  begin
+    SetLength(Spans, Length(Spans) + 1);
+    Spans[High(Spans)] := ASpans[I];
+  end;
+  AError := '';
+  Result := True;
+end;
+
+// The attribute AKey of AData as text, '' when absent.
+function TypesenseAttr(const AData: TPcSpanData; const AKey: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(AData.Attributes) do
+    if AData.Attributes[I].Key = AKey then
+    begin
+      if AData.Attributes[I].ValueType = satInt then
+        Result := IntToStr(AData.Attributes[I].IntValue)
+      else
+        Result := AData.Attributes[I].StringValue;
+      Exit;
+    end;
+end;
+
+// The points of http.client.request.duration for GET to ts:8108 answered 200.
+function TypesenseGetCount: UInt64;
+var
+  LMetrics: TPcMetricList;
+  LPoints: TPcMetricPoints;
+  I, M: Integer;
+begin
+  Result := 0;
+  LMetrics := PcMetrics.Metrics;
+  for M := 0 to High(LMetrics) do
+    if LMetrics[M].Name = PC_HTTP_CLIENT_DURATION_METRIC then
+    begin
+      LPoints := LMetrics[M].Snapshot;
+      for I := 0 to High(LPoints) do
+        if (LPoints[I].LabelValues[0] = 'GET') and (LPoints[I].LabelValues[1] = 'ts') and
+           (LPoints[I].LabelValues[2] = '8108') and (LPoints[I].LabelValues[4] = '200') then
+          Inc(Result, LPoints[I].Count);
+    end;
 end;
 
 { TTypesenseTests }
@@ -914,6 +984,55 @@ begin
   Ok('{"found":0,"hits":[]}');
   FEngine.Index('products').Search('').Execute;
   TAssert.AssertEquals('read again', 'GET /collections/products', Req(3));
+end;
+
+procedure TTypesenseTests.Telemetry_ClientSpansUnderTheCurrent_NoneWithout;
+var
+  LExporterObj: TTypesenseSpanExporter;
+  LExporter: IPcSpanExporter;
+  LParent: IPcSpan;
+  LSpans: TPcSpanDataArray;
+  LGets: UInt64;
+begin
+  LExporterObj := TTypesenseSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-tests', '1.0.0'), LExporter, False);
+  try
+    LGets := TypesenseGetCount;
+    Collection;
+    Ok('{"found":0,"hits":[]}');
+    LParent := TPcTracing.StartSpan('handler', skServer);
+    try
+      FEngine.Index('products').Search('café').Where(F.Eq('category', 'bebida')).Execute;
+    finally
+      LParent.Finish;
+    end;
+    TPcTracing.FlushNow;
+    LSpans := LExporterObj.Spans;
+    // The collection, the search, the handler.
+    TAssert.AssertEquals(3, Length(LSpans));
+    TAssert.AssertEquals('GET', LSpans[1].Name);
+    TAssert.AssertTrue('a client span', LSpans[1].Kind = skClient);
+    TAssert.AssertEquals(LParent.SpanId, LSpans[1].ParentSpanId);
+    TAssert.AssertEquals('q and filter_by are left out', BASE + '/collections/products/documents/search',
+      TypesenseAttr(LSpans[1], 'url.full'));
+    TAssert.AssertEquals('ts', TypesenseAttr(LSpans[1], 'server.address'));
+    TAssert.AssertEquals('200', TypesenseAttr(LSpans[1], 'http.response.status_code'));
+    TAssert.AssertEquals(PcFormatTraceParent(LSpans[1].TraceId, LSpans[1].SpanId, True),
+      FFake.Request(1).Header('traceparent'));
+    TAssert.AssertEquals('the key goes in a header', 'secret',
+      FFake.Request(1).Header('X-TYPESENSE-API-KEY'));
+    // Without a current span: the metric only.
+    Ok('{"found":0,"hits":[]}');
+    FEngine.Index('products').Search('café').Execute;
+    TPcTracing.FlushNow;
+    TAssert.AssertEquals(3, Length(LExporterObj.Spans));
+    TAssert.AssertEquals('', FFake.Request(2).Header('traceparent'));
+    TAssert.AssertEquals(Int64(LGets + 3), Int64(TypesenseGetCount));
+    LParent := nil;
+  finally
+    TPcTracing.Shutdown;
+  end;
 end;
 
 initialization

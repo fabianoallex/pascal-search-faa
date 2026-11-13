@@ -8,6 +8,11 @@
    (docs/design.md, S13 and S24). Task polling runs on a fake clock: TSleep
    advances TTicker, so nothing sleeps.
 
+   The telemetry tests (design, section 13) start TPcTracing without its
+   export thread and read the spans from a fake exporter after FlushNow;
+   http.client.request.duration is the process-wide histogram, read before
+   and after.
+
    What Meilisearch itself does with these requests is the integration
    suite's job (tests/Integration).
 
@@ -22,8 +27,12 @@ uses
   PascalSearch.DUnitXCompat,
   SysUtils,
   PascalCommon.SystemContext,
+  PascalCommon.TraceContext,
+  PascalCommon.Tracing,
+  PascalCommon.Metrics,
   PascalCommon.Http,
   PascalCommon.Http.Fake,
+  PascalCommon.Http.Telemetry,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Values,
@@ -43,6 +52,13 @@ type
     procedure Sleep(milliseconds: Cardinal);
     function NowMs: UInt64;
     property Sleeps: string read FSleeps;
+  end;
+
+  // Keeps every span it is given.
+  TMeiliSpanExporter = class(TInterfacedObject, IPcSpanExporter)
+  public
+    Spans: TPcSpanDataArray;
+    function ExportSpans(const ASpans: TPcSpanDataArray; out AError: string): Boolean;
   end;
 
   [TestFixture]
@@ -103,6 +119,9 @@ type
     [Test] procedure Search_Highlight;
     [Test] procedure NativeSettings_Sent;
     [Test] procedure MaxHits_CacheExpires;
+    [Test] procedure Telemetry_UnderASpan_ClientSpansAndOneWaitSpan;
+    [Test] procedure Telemetry_NoCurrentSpan_NoSpanOnlyTheMetric;
+    [Test] procedure Telemetry_FailedTaskOrTimeout_WaitSpanIsAnError;
   end;
 
 implementation
@@ -125,6 +144,60 @@ end;
 function TFakeTime.NowMs: UInt64;
 begin
   Result := FNow;
+end;
+
+{ TMeiliSpanExporter }
+
+function TMeiliSpanExporter.ExportSpans(const ASpans: TPcSpanDataArray;
+  out AError: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ASpans) do
+  begin
+    SetLength(Spans, Length(Spans) + 1);
+    Spans[High(Spans)] := ASpans[I];
+  end;
+  AError := '';
+  Result := True;
+end;
+
+// The attribute AKey of AData as text, '' when absent.
+function MeiliAttr(const AData: TPcSpanData; const AKey: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(AData.Attributes) do
+    if AData.Attributes[I].Key = AKey then
+    begin
+      if AData.Attributes[I].ValueType = satInt then
+        Result := IntToStr(AData.Attributes[I].IntValue)
+      else
+        Result := AData.Attributes[I].StringValue;
+      Exit;
+    end;
+end;
+
+// The points of http.client.request.duration for AMethod to meili:7700
+// answered 2xx.
+function MeiliDurationCount(const AMethod: string): UInt64;
+var
+  LMetrics: TPcMetricList;
+  LPoints: TPcMetricPoints;
+  I, M: Integer;
+begin
+  Result := 0;
+  LMetrics := PcMetrics.Metrics;
+  for M := 0 to High(LMetrics) do
+    if LMetrics[M].Name = PC_HTTP_CLIENT_DURATION_METRIC then
+    begin
+      LPoints := LMetrics[M].Snapshot;
+      for I := 0 to High(LPoints) do
+        if (LPoints[I].LabelValues[0] = AMethod) and (LPoints[I].LabelValues[1] = 'meili') and
+           (LPoints[I].LabelValues[2] = '7700') and (Copy(LPoints[I].LabelValues[4], 1, 1) = '2') then
+          Inc(Result, LPoints[I].Count);
+    end;
 end;
 
 { TMeilisearchTests }
@@ -834,6 +907,161 @@ begin
   except
     on ESearchArgumentError do
       TAssert.AssertEquals('GET /indexes/products/settings/pagination', Req(3));
+  end;
+end;
+
+procedure TMeilisearchTests.Telemetry_UnderASpan_ClientSpansAndOneWaitSpan;
+var
+  LExporterObj: TMeiliSpanExporter;
+  LExporter: IPcSpanExporter;
+  LParent: IPcSpan;
+  LSpans: TPcSpanDataArray;
+  LGets, LPosts: UInt64;
+  W: ISearchWrite;
+  I: Integer;
+begin
+  LExporterObj := TMeiliSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-tests', '1.0.0'), LExporter, False);
+  try
+    LGets := MeiliDurationCount('GET');
+    LPosts := MeiliDurationCount('POST');
+    IndexFound;
+    Accepted(7);
+    Task(7, 'enqueued');
+    Task(7, 'processing');
+    Task(7, 'succeeded');
+    LParent := TPcTracing.StartSpan('handler', skServer);
+    try
+      W := FEngine.Index('products').Upsert([TSearchDocument.New('1')]);
+      W.WaitFor;
+    finally
+      LParent.Finish;
+    end;
+    TPcTracing.FlushNow;
+    LSpans := LExporterObj.Spans;
+    // GET /indexes/products, POST documents, the wait, the handler.
+    TAssert.AssertEquals(4, Length(LSpans));
+    TAssert.AssertEquals('GET', LSpans[0].Name);
+    TAssert.AssertTrue('a client span', LSpans[0].Kind = skClient);
+    TAssert.AssertEquals(LParent.SpanId, LSpans[0].ParentSpanId);
+    TAssert.AssertEquals(BASE + '/indexes/products', MeiliAttr(LSpans[0], 'url.full'));
+    TAssert.AssertEquals('POST', LSpans[1].Name);
+    TAssert.AssertEquals(LParent.TraceId, LSpans[1].TraceId);
+    TAssert.AssertEquals('the query is left out', BASE + '/indexes/products/documents',
+      MeiliAttr(LSpans[1], 'url.full'));
+    TAssert.AssertEquals('202', MeiliAttr(LSpans[1], 'http.response.status_code'));
+    TAssert.AssertEquals(PcFormatTraceParent(LSpans[1].TraceId, LSpans[1].SpanId, True),
+      FFake.Request(1).Header('traceparent'));
+    TAssert.AssertEquals('the key goes in a header', 'Bearer secret',
+      FFake.Request(1).Header('Authorization'));
+    TAssert.AssertEquals(MEILISEARCH_WAIT_SPAN, LSpans[2].Name);
+    TAssert.AssertTrue('an internal span', LSpans[2].Kind = skInternal);
+    TAssert.AssertEquals(LParent.SpanId, LSpans[2].ParentSpanId);
+    TAssert.AssertEquals('7', MeiliAttr(LSpans[2], 'meilisearch.task.uid'));
+    TAssert.AssertEquals('3', MeiliAttr(LSpans[2], 'meilisearch.task.polls'));
+    TAssert.AssertEquals('succeeded', MeiliAttr(LSpans[2], 'meilisearch.task.status'));
+    TAssert.AssertTrue('a succeeded task is no error', LSpans[2].Status = ssUnset);
+    // The polls: no span and no traceparent, but the metric.
+    for I := 2 to 4 do
+    begin
+      TAssert.AssertEquals('GET /tasks/7', Req(I));
+      TAssert.AssertEquals('', FFake.Request(I).Header('traceparent'));
+    end;
+    TAssert.AssertEquals(Int64(LGets + 4), Int64(MeiliDurationCount('GET')));
+    TAssert.AssertEquals(Int64(LPosts + 1), Int64(MeiliDurationCount('POST')));
+    LParent := nil;
+    W := nil;
+  finally
+    TPcTracing.Shutdown;
+  end;
+end;
+
+procedure TMeilisearchTests.Telemetry_NoCurrentSpan_NoSpanOnlyTheMetric;
+var
+  LExporterObj: TMeiliSpanExporter;
+  LExporter: IPcSpanExporter;
+  LGets: UInt64;
+  I: Integer;
+begin
+  LExporterObj := TMeiliSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-tests', '1.0.0'), LExporter, False);
+  try
+    LGets := MeiliDurationCount('GET');
+    IndexFound;
+    Accepted(8);
+    Task(8, 'processing');
+    Task(8, 'failed', '{"message":"Document has a bad field.","code":"invalid_document_fields",' +
+      '"type":"invalid_request"}');
+    try
+      FEngine.Index('products').Upsert([TSearchDocument.New('1')]).WaitFor;
+      TAssert.Fail('A failed task must raise');
+    except
+      on ESearchWriteFailed do
+        ;
+    end;
+    TPcTracing.FlushNow;
+    TAssert.AssertEquals(0, Length(LExporterObj.Spans));
+    for I := 0 to FFake.RequestCount - 1 do
+      TAssert.AssertEquals('', FFake.Request(I).Header('traceparent'));
+    TAssert.AssertEquals(Int64(LGets + 3), Int64(MeiliDurationCount('GET')));
+  finally
+    TPcTracing.Shutdown;
+  end;
+end;
+
+procedure TMeilisearchTests.Telemetry_FailedTaskOrTimeout_WaitSpanIsAnError;
+var
+  LExporterObj: TMeiliSpanExporter;
+  LExporter: IPcSpanExporter;
+  LParent: IPcSpan;
+  LSpans: TPcSpanDataArray;
+begin
+  LExporterObj := TMeiliSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-tests', '1.0.0'), LExporter, False);
+  try
+    LParent := TPcTracing.StartSpan('handler', skServer);
+    try
+      Task(4, 'failed', '{"message":"Document has a bad field.","code":"invalid_document_fields",' +
+        '"type":"invalid_request"}');
+      try
+        FEngine.WaitForTask(4);
+        TAssert.Fail('A failed task must raise');
+      except
+        on ESearchRequestError do
+          ;
+      end;
+      Task(5, 'processing');
+      Task(5, 'processing');
+      try
+        FEngine.WaitForTask(5, 5);
+        TAssert.Fail('A task still running must time out');
+      except
+        on ESearchTimeout do
+          ;
+      end;
+    finally
+      LParent.Finish;
+    end;
+    TPcTracing.FlushNow;
+    LSpans := LExporterObj.Spans;
+    // The two waits, the handler.
+    TAssert.AssertEquals(3, Length(LSpans));
+    TAssert.AssertEquals(MEILISEARCH_WAIT_SPAN, LSpans[0].Name);
+    TAssert.AssertTrue('a failed task is an error', LSpans[0].Status = ssError);
+    TAssert.AssertEquals('invalid_document_fields', MeiliAttr(LSpans[0], 'error.type'));
+    TAssert.AssertEquals('Document has a bad field.', LSpans[0].StatusMessage);
+    TAssert.AssertEquals('failed', MeiliAttr(LSpans[0], 'meilisearch.task.status'));
+    TAssert.AssertEquals('1', MeiliAttr(LSpans[0], 'meilisearch.task.polls'));
+    TAssert.AssertTrue('a timeout is an error', LSpans[1].Status = ssError);
+    TAssert.AssertEquals('ESearchTimeout', MeiliAttr(LSpans[1], 'error.type'));
+    TAssert.AssertEquals('2', MeiliAttr(LSpans[1], 'meilisearch.task.polls'));
+    TAssert.AssertEquals('5', MeiliAttr(LSpans[1], 'meilisearch.task.uid'));
+    LParent := nil;
+  finally
+    TPcTracing.Shutdown;
   end;
 end;
 

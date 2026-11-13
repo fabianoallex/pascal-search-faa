@@ -18,6 +18,11 @@
     document failing its whole batch, a kind change applied in place, the
     native access.
 
+  - Telemetry (design, section 13) on the real engine: under a span, every
+    request is a client span the engine answered without an error (it
+    accepts the traceparent), Get's url.full ends with the id, the task polls make no span
+    and each wait is one meilisearch.wait_task span with its polls.
+
   Each test uses its own index (it_*), dropped before and after.
 
   DUnitX master, written in FPCUnit's assertion dialect (TAssert.*, through
@@ -30,6 +35,7 @@ interface
 uses
   fpcunit, testregistry,
   SysUtils,
+  PascalCommon.Tracing,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Schema,
@@ -40,6 +46,13 @@ uses
   PascalSearch.IntegrationEnv;
 
 type
+  // Keeps every span it is given.
+  TMeiliItSpanExporter = class(TInterfacedObject, IPcSpanExporter)
+  public
+    Spans: TPcSpanDataArray;
+    function ExportSpans(const ASpans: TPcSpanDataArray; out AError: string): Boolean;
+  end;
+
   TMeilisearchIntegrationTests = class(TTestCase)
   private
     FEngine: IMeilisearchEngine;
@@ -65,6 +78,7 @@ type
     procedure Native_TypoTolerance;
     procedure Native_StopWordsAndRankingRules;
     procedure ReplaceIndex_SettingsTravel;
+    procedure Telemetry_UnderASpan_ClientSpansAndWaits;
   end;
 
 implementation
@@ -73,6 +87,39 @@ const
   IDX = 'it_meili';
   NEVER = 'it_never';
   STAGING = 'it_meili_new';
+
+{ TMeiliItSpanExporter }
+
+function TMeiliItSpanExporter.ExportSpans(const ASpans: TPcSpanDataArray;
+  out AError: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ASpans) do
+  begin
+    SetLength(Spans, Length(Spans) + 1);
+    Spans[High(Spans)] := ASpans[I];
+  end;
+  AError := '';
+  Result := True;
+end;
+
+// The attribute AKey of AData as text, '' when absent.
+function MeiliItAttr(const AData: TPcSpanData; const AKey: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(AData.Attributes) do
+    if AData.Attributes[I].Key = AKey then
+    begin
+      if AData.Attributes[I].ValueType = satInt then
+        Result := IntToStr(AData.Attributes[I].IntValue)
+      else
+        Result := AData.Attributes[I].StringValue;
+      Exit;
+    end;
+end;
 
 { TMeilisearchIntegrationTests }
 
@@ -312,6 +359,70 @@ begin
   TAssert.AssertEquals('new', LIndex.Search('queijo').Execute.Hit(0).Id);
   TAssert.AssertEquals('the source''s settings came along', Int64(0), LIndex.Search('queiju').Execute.Total);
   TAssert.AssertFalse(FEngine.IndexExists(STAGING));
+end;
+
+procedure TMeilisearchIntegrationTests.Telemetry_UnderASpan_ClientSpansAndWaits;
+var
+  LExporterObj: TMeiliItSpanExporter;
+  LExporter: IPcSpanExporter;
+  LParent: IPcSpan;
+  LIndex: ISearchIndex;
+  LData: TPcSpanData;
+  LClients, LWaits, I: Integer;
+  LGetSeen: Boolean;
+begin
+  LExporterObj := TMeiliItSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-it', '1.0.0'), LExporter, False);
+  try
+    LParent := TPcTracing.StartSpan('handler', skServer);
+    try
+      LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+      LIndex.Upsert([TSearchDocument.New('7').Str('title', 'Café')]).WaitFor(30000);
+      TAssert.AssertEquals(Int64(1), LIndex.Search('cafe').Execute.Total);
+      TAssert.AssertEquals('7', LIndex.Get('7').Id);
+    finally
+      LParent.Finish;
+    end;
+    TPcTracing.FlushNow;
+    LClients := 0;
+    LWaits := 0;
+    LGetSeen := False;
+    for I := 0 to High(LExporterObj.Spans) do
+    begin
+      LData := LExporterObj.Spans[I];
+      if LData.SpanId = LParent.SpanId then
+        Continue;
+      TAssert.AssertEquals(LParent.TraceId, LData.TraceId);
+      TAssert.AssertEquals(LParent.SpanId, LData.ParentSpanId);
+      if LData.Kind = skClient then
+      begin
+        Inc(LClients);
+        // A 404 is EnsureIndex's lookup of an index not there yet.
+        if MeiliItAttr(LData, 'http.response.status_code') <> '404' then
+          TAssert.AssertTrue(LData.Name + ' ' + MeiliItAttr(LData, 'url.full') + ': no error',
+            LData.Status = ssUnset);
+        TAssert.AssertEquals('a poll makes no span', 0, Pos('/tasks/', MeiliItAttr(LData, 'url.full')));
+        if MeiliItAttr(LData, 'url.full') = MeiliUrl + '/indexes/' + IDX + '/documents/7' then
+          LGetSeen := True;
+      end
+      else
+      begin
+        Inc(LWaits);
+        TAssert.AssertEquals(MEILISEARCH_WAIT_SPAN, LData.Name);
+        TAssert.AssertEquals('succeeded', MeiliItAttr(LData, 'meilisearch.task.status'));
+        TAssert.AssertTrue('at least one poll', StrToInt(MeiliItAttr(LData, 'meilisearch.task.polls')) >= 1);
+      end;
+    end;
+    // EnsureIndex: the lookup, the create, the settings; the upsert: the
+    // check and the POST; the search; Get. Waits: create, settings, upsert.
+    TAssert.AssertEquals(7, LClients);
+    TAssert.AssertEquals(3, LWaits);
+    TAssert.AssertTrue('Get''s url.full holds the id', LGetSeen);
+    LParent := nil;
+  finally
+    TPcTracing.Shutdown;
+  end;
 end;
 
 initialization

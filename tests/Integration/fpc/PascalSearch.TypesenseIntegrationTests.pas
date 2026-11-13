@@ -21,6 +21,9 @@
   - 0.2.0 (design S25-S29): an index is an alias to its own collection;
     ReplaceIndex onto a collection made by 0.1.0; the synonym set deleted
     after its collection; a curation set pinning and hiding documents.
+  - Telemetry (design, section 13) on the real engine: under a span, every
+    request is a client span the engine answered without an error (it
+    accepts the traceparent), and nothing else.
 
   Each test uses its own collections (it_*), dropped before and after.
 
@@ -34,6 +37,7 @@ interface
 uses
   fpcunit, testregistry,
   SysUtils,
+  PascalCommon.Tracing,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Schema,
@@ -44,6 +48,13 @@ uses
   PascalSearch.IntegrationEnv;
 
 type
+  // Keeps every span it is given.
+  TTypesenseItSpanExporter = class(TInterfacedObject, IPcSpanExporter)
+  public
+    Spans: TPcSpanDataArray;
+    function ExportSpans(const ASpans: TPcSpanDataArray; out AError: string): Boolean;
+  end;
+
   TTypesenseIntegrationTests = class(TTestCase)
   private
     FEngine: ITypesenseEngine;
@@ -72,6 +83,7 @@ type
     procedure ReplaceIndex_OntoA010Collection;
     procedure Synonyms_SetDeletedWithTheIndex;
     procedure Curation_PinsAndHides;
+    procedure Telemetry_UnderASpan_ClientSpans;
   end;
 
 implementation
@@ -81,6 +93,39 @@ const
   NEVER = 'it_ts_never';
   FOREIGN = 'it_ts_foreign';
   STAGING = 'it_ts_new';
+
+{ TTypesenseItSpanExporter }
+
+function TTypesenseItSpanExporter.ExportSpans(const ASpans: TPcSpanDataArray;
+  out AError: string): Boolean;
+var
+  I: Integer;
+begin
+  for I := 0 to High(ASpans) do
+  begin
+    SetLength(Spans, Length(Spans) + 1);
+    Spans[High(Spans)] := ASpans[I];
+  end;
+  AError := '';
+  Result := True;
+end;
+
+// The attribute AKey of AData as text, '' when absent.
+function TypesenseItAttr(const AData: TPcSpanData; const AKey: string): string;
+var
+  I: Integer;
+begin
+  Result := '';
+  for I := 0 to High(AData.Attributes) do
+    if AData.Attributes[I].Key = AKey then
+    begin
+      if AData.Attributes[I].ValueType = satInt then
+        Result := IntToStr(AData.Attributes[I].IntValue)
+      else
+        Result := AData.Attributes[I].StringValue;
+      Exit;
+    end;
+end;
 
 { TTypesenseIntegrationTests }
 
@@ -426,6 +471,48 @@ begin
     TAssert.AssertTrue('hidden', R.Hit(I).Id <> '1');
   FEngine.SetCuration(IDX, []);
   TAssert.AssertEquals('cleared', Int64(2), LIndex.Search('geladeira').Execute.Total);
+end;
+
+procedure TTypesenseIntegrationTests.Telemetry_UnderASpan_ClientSpans;
+var
+  LExporterObj: TTypesenseItSpanExporter;
+  LExporter: IPcSpanExporter;
+  LParent: IPcSpan;
+  LIndex: ISearchIndex;
+  LData: TPcSpanData;
+  I: Integer;
+begin
+  LExporterObj := TTypesenseItSpanExporter.Create;
+  LExporter := LExporterObj;
+  TPcTracing.Start(TPcTracingOptions.Default('search-it', '1.0.0'), LExporter, False);
+  try
+    LParent := TPcTracing.StartSpan('handler', skServer);
+    try
+      LIndex := FEngine.EnsureIndex(TSearchSchema.New(IDX).Text('title'));
+      LIndex.Upsert([TSearchDocument.New('7').Str('title', 'Café')]).WaitFor(30000);
+      TAssert.AssertEquals(Int64(1), LIndex.Search('cafe').Execute.Total);
+    finally
+      LParent.Finish;
+    end;
+    TPcTracing.FlushNow;
+    TAssert.AssertTrue('some client spans', Length(LExporterObj.Spans) > 2);
+    for I := 0 to High(LExporterObj.Spans) do
+    begin
+      LData := LExporterObj.Spans[I];
+      if LData.SpanId = LParent.SpanId then
+        Continue;
+      TAssert.AssertTrue('only client spans', LData.Kind = skClient);
+      TAssert.AssertEquals(LParent.SpanId, LData.ParentSpanId);
+      TAssert.AssertEquals(0, Pos('?', TypesenseItAttr(LData, 'url.full')));
+      // A 404 is the lookup of an index not there yet; nothing else fails.
+      if TypesenseItAttr(LData, 'http.response.status_code') <> '404' then
+        TAssert.AssertTrue(LData.Name + ' ' + TypesenseItAttr(LData, 'url.full') + ': no error',
+          LData.Status = ssUnset);
+    end;
+    LParent := nil;
+  finally
+    TPcTracing.Shutdown;
+  end;
 end;
 
 initialization

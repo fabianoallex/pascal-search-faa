@@ -5,7 +5,7 @@ compiles unchanged on Delphi 12 and Free Pascal 3.2.2; the sample does too.
 
 | Guide | What it covers | Sample |
 |---|---|---|
-| [1. Getting started](getting-started.md) | Choosing an engine, adding the library (Delphi search path, Lazarus packages), configuring Meilisearch or Typesense, TLS, one engine per server shared between threads | 01 |
+| [1. Getting started](getting-started.md) | Choosing an engine, adding the library (Delphi search path, Lazarus packages), configuring Meilisearch or Typesense, TLS, one engine per server shared between threads, tracing and metrics | 01 |
 | [2. Schema and documents](schema-and-documents.md) | Declaring an index (`Text`, `Keyword`, `Num`... with filter, sort and facet flags), `EnsureIndex` and what it can change in place, documents and their ids, instants and numbers | 01 |
 | [3. Writing and waiting](writing.md) | `Upsert`, `Delete`, `DeleteWhere`, `WaitFor`, refused documents, a write that got no answer | 01 |
 | [4. Searching](searching.md) | Text, typed filters, sort, paging, facets, the fields returned, highlight, synonyms, `Get`/`GetMany`, the engine's native access and typed settings | 01 |
@@ -23,8 +23,8 @@ setting).
 
 - Versions and what changed in each: [`CHANGELOG.md`](../CHANGELOG.md). While the version is
   0.x, a minor version may change the API.
-- [`design.md`](design.md): the decisions (S1-S31) and what each part's implementation
-  settled (sections 8-12). [`engine-findings.md`](engine-findings.md): what Meilisearch 1.56.2
+- [`design.md`](design.md): the decisions (S1-S36) and what each part's implementation
+  settled (sections 8-13). [`engine-findings.md`](engine-findings.md): what Meilisearch 1.56.2
   and Typesense 30.2 did when probed, numbered ("finding N"). [`gotchas.md`](gotchas.md): the
   Delphi × FPC and engine surprises found by measurement.
 - [`CLAUDE.md`](../CLAUDE.md) holds the conventions for working on the library itself.

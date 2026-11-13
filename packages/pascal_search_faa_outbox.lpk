@@ -15,7 +15,7 @@
     </CompilerOptions>
     <Description Value="pascal-search-faa's outbox bridge: a pascal-db-faa outbox handler that keeps a search index in step with the database."/>
     <License Value="MIT"/>
-    <Version Minor="2"/>
+    <Version Minor="3"/>
     <Files>
       <Item>
         <Filename Value="..\bridges\outbox\PascalSearch.Outbox.pas"/>

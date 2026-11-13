@@ -3,6 +3,32 @@
 All notable changes to this project. Versions follow `MAJOR.MINOR.PATCH`; until 1.0.0 the
 contract may change in a minor version (it is validated against two engines first).
 
+## [0.3.0] - 2026-11-13
+
+Decisions: `docs/design.md`, section 13 (S32-S36); pascal-common-faa's
+`docs/http-telemetry-design.md` (HT1-HT11), step 5.
+
+### Added
+
+- **Both adapters trace and measure their HTTP calls** through pascal-common-faa 1.33.0's
+  `PcNewTracedHttpTransport`: a client span per request under the thread's current span (none
+  without one), with OpenTelemetry's HTTP attributes and the span's `traceparent` sent, and
+  `http.client.request.duration` on `PcMetrics` for every request. `url.full` has no query;
+  the keys stay in headers. Guide 1, "Tracing and metrics".
+- Meilisearch: each wait for a task is one internal span, `meilisearch.wait_task`
+  (`MEILISEARCH_WAIT_SPAN`), with `meilisearch.task.uid`, `.status` and `.polls`, an error when
+  the task didn't succeed; only under a current span.
+
+### Changed
+
+- **The adapters need pascal-common-faa 1.33.0** (`$MESSAGE FATAL` in each unit, `MinVersion`
+  in their packages). The core, the mock and the outbox bridge still need 1.20.0.
+- A transport given to `TMeilisearchEngine.New`/`TTypesenseEngine.New` is wrapped too: don't
+  pass one already wrapped with `PcNewTracedHttpTransport` (each call would be recorded twice).
+- Meilisearch's task polls (`GET /tasks/{uid}` inside a wait) make no span and send no
+  `traceparent`, only the metric, through the same connection pool. `ISearchWrite.Pending`
+  (one read) keeps its client span.
+
 ## [0.2.0] - 2026-11-11
 
 Decisions: `docs/design.md`, section 12 (S25-S31); what the engines did: findings 57-71.

@@ -7,7 +7,7 @@ Meilisearch adapter followed on 2026-11-10, on pascal-common-faa 1.31.0's HTTP c
 and the Typesense adapter the same day (section 10): the contract suite passed on it unchanged.
 The outbox bridge's decisions were accepted on 2026-11-10, as proposed (section 11). Section 12
 (0.2.0: replacing an index, listing ids, highlight, synonyms, giving up) was accepted on
-2026-11-11.
+2026-11-11, section 13 (0.3.0: HTTP telemetry) on 2026-11-13.
 Every decision is numbered (S1...).
 "Finding N" points to [`engine-findings.md`](engine-findings.md) (Meilisearch 1.56.2 and
 Typesense 30.2, measured through FPC 3.2.2 on Linux).
@@ -30,8 +30,8 @@ A contract for external search engines, one adapter per engine, and an in-memory
 | Package | Units | Depends on |
 |---|---|---|
 | `pascal_search_faa` (core, `src/`) | `PascalSearch.Version`, `.Interfaces`, `.Schema`, `.Documents`, `.Filters`, `.Errors`, `.Values`, `.Query`, `.Mock`, `.EngineJson` | pascal-common-faa 1.20.0+ (`PcFoldForSearch`, `PcLowerCase`), pascal-jsonmapper-faa 0.7.0+ (JSON DOM, DTO mapping) |
-| `pascal_search_faa_meilisearch` (`adapters/meilisearch/`) | `PascalSearch.Meilisearch` | core, pascal-common-faa 1.31.0+ (`PascalCommon.Http`, `TSleep`/`TTicker`) |
-| `pascal_search_faa_typesense` (`adapters/typesense/`) | `PascalSearch.Typesense` | core, pascal-common-faa 1.31.0+ |
+| `pascal_search_faa_meilisearch` (`adapters/meilisearch/`) | `PascalSearch.Meilisearch` | core, pascal-common-faa 1.33.0+ (`PascalCommon.Http`, `.Http.Telemetry`, `TSleep`/`TTicker`; 1.31.0+ until 0.2.0) |
+| `pascal_search_faa_typesense` (`adapters/typesense/`) | `PascalSearch.Typesense` | core, pascal-common-faa 1.33.0+ (1.31.0+ until 0.2.0) |
 | `pascal_search_faa_outbox` (`bridges/outbox/`) | `PascalSearch.Outbox` | core, pascal-db-faa 0.21.0+ (`PascalDb.Outbox`; 0.18.0+ until 0.1.0) |
 
 **S1. JSON through pascal-jsonmapper-faa.** Its DOM (`TJsonValue`) gives the same text on both
@@ -580,3 +580,48 @@ pascal-db-faa 0.21.0.
 
 **S31. Version 0.2.0**; pascal-common-faa 1.20.0 for the core and 1.31.0 for the adapters, as
 before.
+
+## 13. 0.3.0: HTTP telemetry
+
+Accepted 2026-11-13 (the user took the four recommendations). pascal-common-faa 1.33.0 has
+`PascalCommon.Http.Telemetry` (its `docs/http-telemetry-design.md`, HT1-HT11): a decorator over
+any `IPcHttpTransport` that records each `Send` as an OpenTelemetry HTTP client span and a point
+of `http.client.request.duration` on `PcMetrics`. This is step 5 of that design.
+
+**S32. Each adapter wraps its transport, always**: the one it builds and the one given to `New`
+(the tests' `TPcFakeHttpTransport`, an application's own), as pascal-api-infra-faa's MCP executor
+does. So the tests go through the same path as production. A caller must not pass a transport
+already wrapped: each call would make two spans and two points (the units' headers say so).
+The decorator's zeroed options apply: a span only under the thread's current span, with its
+`traceparent` sent; without one, only the metric (HT3). Spans cost about 3 µs a call, the metric
+about 2 µs (HT8), nothing next to a search over a network.
+
+**S33. Meilisearch's task polls make no span.** Measured against Meilisearch 1.56.2 in Docker
+(2026-11-13, the adapter's schedule, 5 ms doubling up to 200 ms; polls per write, min / median /
+max, 5 runs each): create an index 3/3/4, settings 2/2/3, upsert of 1, 100 and 1000 documents
+4/4/5, 4/4/5 and 5/6/6, of 10 000 8/8/9 (689 ms), delete-batch 4/4/4, delete by filter 2/2/2.
+A typical upsert was 6 client spans (the index check, the POST, about 4 polls). The polls now go
+through a second decorator over the **same inner transport** (one pool) with `NoSpans`: each
+is a point of the metric, with no span and no `traceparent`. `ISearchWrite.Pending` is one read
+the caller asked for, not a poll: it keeps its client span.
+
+**S34. One span of the library's own: `meilisearch.wait_task`** (`MEILISEARCH_WAIT_SPAN`),
+internal, around each wait for a task (`WaitFor`, `WaitForTask`, and the waits inside
+`EnsureIndex`, `DropIndex`, `ReplaceIndex`, `SetSynonyms` and the native settings), only under
+a current span, like the decorator. Attributes: `meilisearch.task.uid`, `meilisearch.task.polls`,
+`meilisearch.task.status`. A task that didn't succeed sets `error.type` to its error code and
+the status to error with its message; a timeout or a failed poll sets `error.type` to the
+exception's class. It explains the gap between the POST and the next call; an upsert under a
+span is now 3 spans. No span per operation (`search`, `upsert`): the client spans already name
+the method and the index in `url.full`. **Typesense** has nothing to poll: its writes are
+synchronous (finding 4), and `WaitFor` only raises what the answer said.
+
+**S35. What reaches the collector.** `url.full` is the URL without the query and the fragment
+(HT2): it holds index and collection names (`products@1731...` on Typesense) and, for `Get`, a
+document's id (`/indexes/products/documents/123`). The guide says so: an id that is personal
+data goes to the collector with the span; the metric never has the path. The search text and the
+filters don't (Meilisearch sends them in the body, Typesense in the query). The keys go in
+headers on both engines (`Authorization: Bearer`, `X-TYPESENSE-API-KEY`), never in the URL.
+
+**S36. Version 0.3.0**; pascal-common-faa 1.33.0 for the adapters (`$MESSAGE FATAL` in each
+unit), 1.20.0 for the core, the mock and the bridge, as before.

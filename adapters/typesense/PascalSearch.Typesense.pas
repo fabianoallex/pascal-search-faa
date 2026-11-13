@@ -3,7 +3,7 @@
 {$I pascalsearch.inc}
 
 (* The contract on Typesense (pinned and probed: 30.2), over pascal-common-faa's
-   HTTP client (PascalCommon.Http, 1.31.0 or later), which verifies TLS on
+   HTTP client (PascalCommon.Http, 1.33.0 or later), which verifies TLS on
    both compilers.
 
      Config := TTypesenseConfig.Create('https://search.local:8108', LKey);
@@ -12,6 +12,15 @@
 
    Keep one engine per server and share it between threads: it owns one HTTP
    transport and its pool of kept-alive connections.
+
+   Telemetry (design, section 13): the transport, the engine's own or the
+   one given to New, is wrapped with PcNewTracedHttpTransport. Each request
+   is a client span under the thread's current span (none without one)
+   carrying its traceparent, and a point of http.client.request.duration on
+   PcMetrics. Don't pass a transport that is already wrapped: each call
+   would make two spans and two points. url.full has the path (collection
+   names, a document's id in Get), never the query (q, filter_by); the key
+   goes in a header. Writes are synchronous: there is nothing to poll.
 
    How the contract maps (docs/design.md; "finding N" is
    docs/engine-findings.md):
@@ -206,6 +215,7 @@ uses
   PascalCommon.Version,
   PascalCommon.Utf8,
   PascalCommon.SystemContext,
+  PascalCommon.Http.Telemetry,
   PascalJsonMapper.Json,
   PascalSearch.Errors,
   PascalSearch.Values,
@@ -213,8 +223,8 @@ uses
   PascalSearch.Query,
   PascalSearch.EngineJson;
 
-{$IF PASCALCOMMON_VERSION < 13100}
-  {$MESSAGE FATAL 'pascal-search-faa needs pascal-common-faa 1.31.0 or later (PascalCommon.Http)'}
+{$IF PASCALCOMMON_VERSION < 13300}
+  {$MESSAGE FATAL 'pascal-search-faa needs pascal-common-faa 1.33.0 or later (PascalCommon.Http.Telemetry)'}
 {$IFEND}
 
 const
@@ -810,10 +820,12 @@ begin
   if LUrl.Target <> '/' then
     raise ESearchArgumentError.CreateFmt('%s: the URL is the server only, without a path or query (got "%s").',
       [ENGINE_NAME, AConfig.Url]);
+  // Every call is a client span under the current one and a duration on
+  // PcMetrics (design, section 13).
   if ATransport <> nil then
-    FTransport := ATransport
+    FTransport := PcNewTracedHttpTransport(ATransport)
   else
-    FTransport := PcNewHttpTransport(AConfig.Http);
+    FTransport := PcNewTracedHttpTransport(PcNewHttpTransport(AConfig.Http));
 end;
 
 destructor TTypesenseEngine.Destroy;
